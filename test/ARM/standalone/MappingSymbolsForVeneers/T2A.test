@@ -1,0 +1,34 @@
+#---T2A.test--------- Executable-----------------------------------#
+#BEGIN_COMMENT
+#Check Thumb to ARM Veneers
+#END_COMMENT
+#START_TEST
+RUN: %clang %clangopts -c -mthumb  %p/Inputs/1.c -o %t1.t2a.1.o
+RUN: %link %linkopts %t1.t2a.1.o  -o %t2.t2a.1.out --defsym bar=0x80000000
+RUN: %objdump -d %t2.t2a.1.out | %filecheck %s -check-prefix=STATIC
+RUN: %link %linkopts %t1.t2a.1.o  -o %t2.t2a.2.out --defsym bar=0x80000000 -shared
+RUN: %objdump -d %t2.t2a.2.out | %filecheck %s -check-prefix=SHARED
+RUN: %link %linkopts %t1.t2a.1.o  -o %t2.t2a.3.out --defsym bar=0x80000000 --pic-veneer
+RUN: %objdump -d %t2.t2a.3.out | %filecheck %s -check-prefix=PICVENEER
+
+#STATIC: {{.*}} <__bar_T2A_veneer@island-1>:
+#STATIC:       {{.*}}: 4778          bx      pc
+#STATIC:       {{.*}}: 46c0          mov     r8, r8
+#STATIC:       {{.*}}: e51ff004      ldr     pc, [pc, #-0x4]
+#STATIC:       {{.*}}:       00 00 00 80     .word   0x80000000
+
+#SHARED: {{.*}} <__bar_T2A_veneer@island-1>:
+#SHARED:      {{.*}}: 4778          bx      pc
+#SHARED:      {{.*}}: 46c0          mov     r8, r8
+#SHARED:      {{.*}}: e59fc000      ldr     r12, [pc]
+#SHARED:      {{.*}}: e08cf00f      add     pc, r12, pc
+#SHARED:      {{.*}}:       d4 ff ff ff     .word   0xffffffd4
+
+#PICVENEER: {{.*}} <__bar_T2A_veneer@island-1>:
+#PICVENEER:      {{.*}}: 4778          bx      pc
+#PICVENEER:      {{.*}}: 46c0          mov     r8, r8
+#PICVENEER:      {{.*}}: e59fc000      ldr     r12, [pc]
+#PICVENEER:      {{.*}}: e08cf00f      add     pc, r12, pc
+#PICVENEER:      {{.*}}:       {{.*}}     .word   {{0x[0-9a-f]+}}
+
+#END_TEST

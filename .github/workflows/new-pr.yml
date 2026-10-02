@@ -1,0 +1,120 @@
+name: "New pull requests policy check"
+
+permissions:
+  contents: read
+
+on:
+  # Copied from LLVM's workflow
+  # It's safe to use pull_request_target here, because we aren't checking out
+  # code from the pull request branch.
+  # See https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
+  # zizmor: ignore[dangerous-triggers] no PR code is checked out; labeler only reads PR metadata
+  pull_request_target:
+    types:
+      - opened
+      - edited
+      - reopened
+      - ready_for_review
+      - synchronize
+
+jobs:
+  automate-pr-labels:
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write
+    if: >
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action == 'opened' ||
+       github.event.action == 'reopened' ||
+       github.event.action == 'ready_for_review')
+    steps:
+      - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
+        id: labeler
+        with:
+          configuration-path: .github/pr-labeler.yml
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+  policy-checks:
+    needs: automate-pr-labels
+    if: >
+      always() &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Collect PR text and linked issues
+        id: metadata
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const number = context.payload.pull_request.number;
+
+            const pull = await github.rest.pulls.get({ owner, repo, pull_number: number });
+
+            const labels = pull.data.labels.map(label => label.name);
+            core.setOutput('has_labels', labels.length > 0 ? 'true' : 'false');
+            core.setOutput('skip_pr_check', labels.includes('skip-pr-check') ? 'true' : 'false');
+
+            const linked = await github.graphql(`
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    closingIssuesReferences(first: 100) {
+                      nodes {
+                        number
+                        state
+                        repository {
+                          nameWithOwner
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `, { owner, repo, number });
+            const references = linked.repository.pullRequest.closingIssuesReferences.nodes;
+            const closed = references
+              .filter(issue => issue.state === 'CLOSED')
+              .map(issue => `${issue.repository.nameWithOwner}#${issue.number}`);
+
+            core.setOutput('has_linked_issue', references.length > 0 ? 'true' : 'false');
+            core.setOutput('closed_issues', closed.join(', '));
+
+      - name: Report PR policy warnings
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SKIP_PR_CHECK: ${{ steps.metadata.outputs.skip_pr_check }}
+          HAS_LABELS: ${{ steps.metadata.outputs.has_labels }}
+          HAS_LINKED_ISSUE: ${{ steps.metadata.outputs.has_linked_issue }}
+          CLOSED_ISSUES: ${{ steps.metadata.outputs.closed_issues }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const warnings = [];
+
+            if (process.env.HAS_LABELS !== 'true') {
+              warnings.push('### Missing label\n\nThis PR has no labels.');
+            }
+            if (process.env.SKIP_PR_CHECK !== 'true' && process.env.HAS_LINKED_ISSUE !== 'true') {
+              warnings.push('### Missing linked issue\n\nThis PR does not reference an issue with a closing keyword such as `Fixes #123`.');
+            }
+            if (process.env.SKIP_PR_CHECK !== 'true' && process.env.CLOSED_ISSUES) {
+              warnings.push(`### Closed linked issue\n\nThis PR references an issue that is already closed: ${process.env.CLOSED_ISSUES}.`);
+            }
+
+            const summary = warnings.length
+              ? `## PR policy warnings\n\n${warnings.join('\n\n')}`
+              : '## PR policy checks\n\nNo warnings found.';
+            await require('fs').promises.appendFile(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+            for (const warning of warnings) {
+              core.warning(warning.replace(/\n+/g, ' '));
+            }
+            if (warnings.length) {
+              core.setFailed('PR policy warnings detected. See the job summary for details.');
+            }

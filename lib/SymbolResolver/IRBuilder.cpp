@@ -1,0 +1,853 @@
+//===- IRBuilder.cpp-------------------------------------------------------===//
+// Part of the eld Project, under the BSD License
+// See https://github.com/qualcomm/eld/LICENSE.txt for license information.
+// SPDX-License-Identifier: BSD-3-Clause
+//===----------------------------------------------------------------------===//
+//
+//                     The MCLinker Project
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+
+#include "eld/SymbolResolver/IRBuilder.h"
+#include "eld/Config/LinkerConfig.h"
+#include "eld/Core/LinkerScript.h"
+#include "eld/Core/Module.h"
+#include "eld/Diagnostics/DiagnosticPrinter.h"
+#include "eld/Fragment/FragmentRef.h"
+#include "eld/Fragment/RegionFragmentEx.h"
+#include "eld/Input/ArchiveMemberInput.h"
+#include "eld/Input/ELFDynObjectFile.h"
+#include "eld/Input/ELFFileBase.h"
+#include "eld/Input/ELFObjectFile.h"
+#include "eld/Input/ObjectFile.h"
+#include "eld/Object/ObjectBuilder.h"
+#include "eld/Support/Memory.h"
+#include "eld/Support/MemoryArea.h"
+#include "eld/Support/MsgHandling.h"
+#include "eld/Support/RegisterTimer.h"
+#include "eld/SymbolResolver/LDSymbol.h"
+#include "eld/SymbolResolver/NamePool.h"
+#include "eld/SymbolResolver/ResolveInfo.h"
+#include "eld/SymbolResolver/SymbolInfo.h"
+#include "eld/SymbolResolver/SymbolResolutionInfo.h"
+#include "eld/Target/Relocator.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/BinaryFormat/ELF.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Object/ELF.h"
+#include "llvm/Support/StringSaver.h"
+#include <unordered_map>
+
+using namespace eld;
+
+//===----------------------------------------------------------------------===//
+// IRBuilder
+//===----------------------------------------------------------------------===//
+IRBuilder::IRBuilder(Module &CurModule, LinkerConfig &Config)
+    : ThisModule(CurModule), ThisConfig(Config), ThisInputBuilder(Config) {
+  IsGarbageCollected = Config.options().gcSections();
+}
+
+IRBuilder::~IRBuilder() {}
+
+void IRBuilder::requestGarbageCollection() { IsGarbageCollected = true; }
+
+LDSymbol *IRBuilder::makeLDSymbol(ResolveInfo *R) {
+  return make<LDSymbol>(R, IsGarbageCollected);
+}
+
+/// addSymbol - To add a symbol in the input file and resolve the symbol
+/// immediately
+LDSymbol *IRBuilder::addSymbol(InputFile &Input, const std::string &SymbolName,
+                               ResolveInfo::Type Type, ResolveInfo::Desc Desc,
+                               ResolveInfo::Binding Bind,
+                               ResolveInfo::SizeType Size,
+                               LDSymbol::ValueType Value,
+                               ELFSection *CurSection,
+                               ResolveInfo::Visibility Vis, bool IsPostLtoPhase,
+                               uint32_t Shndx, uint32_t Idx) {
+  if (Input.getInput()->getAttribute().isJustSymbols()) {
+    ThisModule.getBackend().addSymDefProvideSymbol(SymbolName, Type, Value,
+                                                   &Input);
+    return nullptr;
+  }
+  // rename symbols
+  std::string Name = SymbolName;
+  ResolveInfo::Binding Binding = Bind;
+  ELFObjectFile *EObj = llvm::dyn_cast<ELFObjectFile>(&Input);
+  if (!ThisConfig.options().renameMap().empty()) {
+    auto RenameSym = ThisConfig.options().renameMap().find(SymbolName);
+    if (ThisConfig.options().renameMap().end() != RenameSym) {
+      bool TraceWrap = ThisModule.getPrinter()->traceWrapSymbols();
+      // If the renameMap is not empty, some symbols should be renamed.
+      // --wrap and --portable defines the symbol rename map.
+      if (ResolveInfo::Undefined == Desc && (!EObj || !EObj->isLTOObject())) {
+        Name = RenameSym->getValue();
+        if (TraceWrap)
+          ThisConfig.raise(Diag::rename_undef_sym)
+              << Input.getInput()->decoratedPath() << SymbolName
+              << RenameSym->getValue();
+      } else if (Desc == ResolveInfo::Define && EObj && EObj->isLTOObject()) {
+        if (TraceWrap)
+          ThisConfig.raise(Diag::restore_def_binding) << SymbolName;
+        Binding = static_cast<ResolveInfo::Binding>(
+            ThisModule.getWrapSymBinding(SymbolName));
+      }
+    }
+  }
+
+  ArchiveMemberInput *AMI =
+      llvm::dyn_cast<eld::ArchiveMemberInput>(Input.getInput());
+  // Fix up the visibility if object has no export set.
+  if (AMI && AMI->noExport() && (Desc != ResolveInfo::Undefined)) {
+    if ((Vis == ResolveInfo::Default) || (Vis == ResolveInfo::Protected)) {
+      Vis = ResolveInfo::Hidden;
+    }
+  }
+
+  LayoutInfo *layoutInfo = ThisModule.getLayoutInfo();
+
+  switch (Input.getKind()) {
+  case InputFile::BinaryFileKind:
+  case InputFile::ELFObjFileKind: {
+
+    FragmentRef *FragRef = nullptr;
+    if (nullptr == CurSection || ResolveInfo::Undefined == Desc ||
+        ResolveInfo::Common == Desc || ResolveInfo::Absolute == Binding ||
+        CurSection->isIgnore() || CurSection->isDiscard() ||
+        (CurSection->isGroupKind() &&
+         LinkerConfig::Object != ThisConfig.codeGenType())) {
+      if (CurSection && (CurSection->isIgnore() || CurSection->isDiscard()))
+        FragRef = FragmentRef::discard();
+      else
+        FragRef = FragmentRef::null();
+    } else {
+      if (CurSection->isMergeKind()) {
+        auto *Strings =
+            llvm::cast<MergeStringFragment>(CurSection->getFrontFragment());
+        FragRef = make<FragmentRef>(*Strings, Value);
+      }
+      if (!FragRef) {
+        FragRef = FragmentRef::null();
+        if (CurSection->hasSectionData()) {
+          Fragment *Frag = CurSection->getFrontFragment();
+          FragRef = make<FragmentRef>(*Frag, Value - CurSection->addr());
+        }
+      }
+    }
+
+    ObjectFile *ObjFile = llvm::dyn_cast<eld::ObjectFile>(&Input);
+
+    LDSymbol *InputSym = nullptr;
+    {
+      eld::RegisterTimer T("Add symbols from object files", "Symbol Resolution",
+                           ThisConfig.options().printTimingStats());
+
+      InputSym =
+          addSymbolFromObject(Input, Name, Type, Desc, Binding, Size, Value,
+                              FragRef, Vis, Shndx, IsPostLtoPhase, Idx);
+    }
+    // Symbols from non allocatable sections should not participate in garbage
+    // collection
+    if (IsPostLtoPhase && CurSection && !CurSection->isAlloc()) {
+      InputSym->setShouldIgnore(false);
+      LDSymbol *OutSymbol = InputSym->resolveInfo()->outSymbol();
+      if (OutSymbol)
+        OutSymbol->setShouldIgnore(false);
+    }
+    // FIXME: Why is input_sym nullptr? Shouldn't there be any error in this
+    // case?
+    if (!InputSym)
+      return nullptr;
+
+    // FIXME: Why don't we record symbol if there is no pSection?
+    if (layoutInfo && CurSection) {
+      layoutInfo->recordFragment(&Input, CurSection, FragRef->frag());
+      layoutInfo->recordSymbol(FragRef->frag(), InputSym);
+    }
+    ObjFile->addSymbol(InputSym);
+    if (CurSection && ThisConfig.options().isSectionTracingRequested() &&
+        ThisConfig.options().traceSection(CurSection))
+      ThisConfig.raise(Diag::symbols_in_section_info)
+          << CurSection->getDecoratedName(ThisConfig.options())
+          << InputSym->name();
+    return InputSym;
+  }
+  case InputFile::ELFDynObjFileKind: {
+    {
+      eld::RegisterTimer T("Add symbols from dynamic object files",
+                           "Symbol Resolution",
+                           ThisConfig.options().printTimingStats());
+
+      LDSymbol *InputSym =
+          addSymbolFromDynObj(Input, Name, Type, Desc, Binding, Size, Value,
+                              Vis, Shndx, IsPostLtoPhase, Idx);
+      if (InputSym)
+        llvm::cast<ELFDynObjectFile>(&Input)->addSymbol(InputSym);
+      return InputSym;
+    }
+  }
+  default:
+    break;
+  }
+  return nullptr;
+}
+
+LDSymbol *IRBuilder::addSymbolFromObject(
+    InputFile &Input, const std::string &SymbolName, ResolveInfo::Type Type,
+    ResolveInfo::Desc Desc, ResolveInfo::Binding Binding,
+    ResolveInfo::SizeType Size, LDSymbol::ValueType Value,
+    FragmentRef *CurFragmentRef, ResolveInfo::Visibility Visibility,
+    uint32_t Shndx, bool IsPostLtoPhase, uint32_t Idx) {
+  // Step 1. calculate a Resolver::Result
+  // ResolvedResult is a triple <resolved_info, existent, override>
+  eld::RegisterTimer T("Create && Resolve symbols", "Symbol Resolution",
+                       ThisConfig.options().printTimingStats());
+  NamePool &NP = ThisModule.getNamePool();
+
+  // Insert one ResolveInfo into the NamePool.
+  // Used once for unversioned / non-default-versioned inputs and twice for
+  // default-versioned inputs (one call per (canonical, non-canonical)
+  // alias). Returns nullptr on error.
+  auto AddSymbol = [&](ResolveInfo InputSymbolResolveInfo,
+                       LDSymbol::ValueType ValueArg) -> LDSymbol * {
+    Resolver::Result ResolvedResult = {nullptr, false, false};
+    LDSymbol *InputSym = makeLDSymbol(nullptr);
+    InputSym->setFragmentRef(CurFragmentRef);
+    InputSym->setSectionIndex(Shndx);
+    InputSym->setSymbolIndex(Idx);
+
+    auto &PM = ThisModule.getPluginManager();
+    SymbolInfo SymInfo(&Input, Size, Binding, Type, Visibility, Desc,
+                       /*isBitcode=*/false);
+    DiagnosticPrinter *DP = ThisConfig.getPrinter();
+    auto OldErrorCount = DP->getNumErrors() + DP->getNumFatalErrors();
+    PM.callVisitSymbolHook(InputSym, InputSymbolResolveInfo.getName(), SymInfo);
+    auto NewErrorCount = DP->getNumErrors() + DP->getNumFatalErrors();
+    if (NewErrorCount != OldErrorCount)
+      return nullptr;
+
+    if (Binding == ResolveInfo::Binding::Local) {
+      ResolveInfo *RI = NP.insertLocalSymbol(InputSymbolResolveInfo, *InputSym);
+      RI->setOutSymbol(InputSym);
+      InputSym->setResolveInfo(*RI);
+      return InputSym;
+    }
+
+    if (ThisModule.getConfig().options().shouldEmitSymbolResolutionReport())
+      NP.getSRI().recordSymbolInfo(InputSym, SymInfo);
+
+    bool S = NP.insertNonLocalSymbol(InputSymbolResolveInfo, *InputSym,
+                                     IsPostLtoPhase, ResolvedResult);
+    if (!S)
+      return nullptr;
+
+    if (ThisConfig.options().cref() || ThisConfig.options().buildCRef())
+      addToCref(Input, ResolvedResult);
+
+    LDSymbol *OutputSym = ResolvedResult.Info->outSymbol();
+    bool HasOutputSym = (nullptr != OutputSym);
+
+    InputSym->setResolveInfo(*ResolvedResult.Info);
+
+    LDSymbol::ValueType ValueLocal = ValueArg;
+    if (ResolvedResult.Overriden) {
+      if (CurFragmentRef && CurFragmentRef->frag()) {
+        ELFSection *Sec = CurFragmentRef->frag()->getOwningSection();
+        ValueLocal = ValueLocal - Sec->addr();
+      }
+      ResolvedResult.Info->setValue(ValueLocal, /*isFinal=*/false);
+      ResolvedResult.Info->setOutSymbol(InputSym);
+    } else if (!ResolvedResult.Overriden && !HasOutputSym) {
+      // Set the out symbol for the corresponding shared library symbol because
+      // the symbol is referenced by an object file.
+      // For shared library symbols, out symbol in ResolveInfo is only set if
+      // the symbol is referenced by a relocatable object file.
+      LDSymbol *SharedLibSym = NP.getSharedLibSymbol(ResolvedResult.Info);
+      if (SharedLibSym)
+        ResolvedResult.Info->setOutSymbol(SharedLibSym);
+    }
+
+    if (ThisModule.getPrinter()->traceSymbols())
+      ThisConfig.raise(Diag::obj_symbol_created)
+          << InputSym->name() << InputSym->sectionIndex()
+          << InputSym->resolveInfo()->infoAsString();
+    return InputSym;
+  };
+
+#ifdef ELD_ENABLE_SYMBOL_VERSIONING
+  ParsedVersionedName P = parseVersionedName(SymbolName);
+  assert(!P.IsMalformed &&
+         "malformed versioned symbol names must be rejected before IRBuilder");
+
+  if (!P.Version.empty() && Binding != ResolveInfo::Binding::Local) {
+    if (P.IsDefault && Desc == ResolveInfo::Undefined) {
+      ThisConfig.raise(Diag::error_default_versioned_undef_ref)
+          << Input.getInput()->decoratedPath() << SymbolName;
+      return nullptr;
+    }
+
+    // Build the canonical name: always single `@`. Default-ness is
+    // tracked by the ResolveInfo flag.
+    std::string CanonicalName = (P.Base + "@" + P.Version).str();
+
+    LDSymbol *NonCanonicalSym = nullptr;
+    LDSymbol *CanonicalSym = nullptr;
+
+    // A default-versioned definition `bar@@V1` also claims the
+    // unversioned slot `bar`, so synthesize the non-canonical alias.
+    // If the input independently defines `bar` (e.g. a body symbol from
+    // `int bar(){}` alongside `.symver bar, bar@@V1`), the alias and the
+    // body collide on the unversioned slot and a multiple-definition
+    // error is reported — that is acceptable.
+    if (P.IsDefault) {
+      ResolveInfo NonCanonRI =
+          NP.createInputSymbolRI(P.Base.str(), Input, /*isDyn=*/false, Type,
+                                 Desc, Binding, Size, Visibility, Value);
+      NonCanonicalSym = AddSymbol(NonCanonRI, Value);
+      if (!NonCanonicalSym)
+        return nullptr;
+      if (auto *EFB = llvm::dyn_cast<ELFFileBase>(&Input))
+        EFB->addNonCanonicalSymbol(NonCanonicalSym);
+    }
+
+    ResolveInfo CanonRI =
+        NP.createInputSymbolRI(CanonicalName, Input, /*isDyn=*/false, Type,
+                               Desc, Binding, Size, Visibility, Value);
+    CanonRI.setDefaultVersion(P.IsDefault);
+    CanonicalSym = AddSymbol(CanonRI, Value);
+    if (!CanonicalSym)
+      return nullptr;
+
+    if (NonCanonicalSym && CanonicalSym)
+      VersionedSymbols.push_back({CanonicalSym, NonCanonicalSym});
+
+    if (ThisModule.getPrinter()->traceSymbolVersioning())
+      ThisConfig.raise(Diag::trace_object_versioned_symbol)
+          << SymbolName << Input.getInput()->decoratedPath();
+
+    return CanonicalSym;
+  }
+#endif
+  // Unversioned/local: original path. Local versioned symbols are opaque local
+  // names, not GNU-versioned dynamic symbols.
+  ResolveInfo InputSymbolResolveInfo =
+      NP.createInputSymbolRI(SymbolName, Input, /*isDyn=*/false, Type, Desc,
+                             Binding, Size, Visibility, Value);
+  return AddSymbol(InputSymbolResolveInfo, Value);
+}
+
+LDSymbol *IRBuilder::addSymbolFromDynObj(
+    InputFile &Input, const std::string &SymbolName, ResolveInfo::Type Type,
+    ResolveInfo::Desc Desc, ResolveInfo::Binding Binding,
+    ResolveInfo::SizeType Size, LDSymbol::ValueType Value,
+    ResolveInfo::Visibility Visibility, uint32_t Shndx, bool IsPostLtoPhase,
+    uint32_t SymIdx) {
+  // We don't need sections of dynamic objects. So we ignore section symbols.
+  if (Type == ResolveInfo::Section)
+    return nullptr;
+
+  // ignore symbols with local binding or that have internal or hidden
+  // visibility
+  if (Binding == ResolveInfo::Local || Visibility == ResolveInfo::Internal ||
+      Visibility == ResolveInfo::Hidden)
+    return nullptr;
+
+  eld::RegisterTimer T("Create && Resolve dynamic symbols", "Symbol Resolution",
+                       ThisConfig.options().printTimingStats());
+  NamePool &NP = ThisModule.getNamePool();
+
+  // Get the old symbol before resolution to check if it's from an object file
+  // or needed shared library. We need to save the origin before resolution
+  // because the resolver will override it.
+  ResolveInfo *oldInfo = NP.findInfo(SymbolName);
+  InputFile *oldOrigin = (oldInfo ? oldInfo->resolvedOrigin() : nullptr);
+
+  ResolveInfo InputSymbolResolveInfo =
+      NP.createInputSymbolRI(SymbolName, Input, /*isDyn=*/true, Type, Desc,
+                             Binding, Size, Visibility, Value);
+
+#ifdef ELD_ENABLE_SYMBOL_VERSIONING
+  ELFDynObjectFile *DynObjFile = llvm::cast<ELFDynObjectFile>(&Input);
+  bool IsDefaultVersionedSymbol = false;
+  std::optional<std::string> OptVersionedName;
+  if (DynObjFile->hasSymbolVersioningInfo()) {
+    llvm::StringRef VerName =
+        (ThisConfig.targets().is32Bits()
+             ? DynObjFile->getSymbolVersionName<llvm::object::ELF32LE>(SymIdx,
+                                                                       Desc)
+             : DynObjFile->getSymbolVersionName<llvm::object::ELF64LE>(SymIdx,
+                                                                       Desc));
+    // Version name is empty for the VER_NDX_GLOBAL and VER_NDX_LOCAL versions.
+    if (!VerName.empty())
+      OptVersionedName = SymbolName + "@" + VerName.str();
+
+    IsDefaultVersionedSymbol = DynObjFile->isDefaultVersionedSymbol(SymIdx);
+  }
+#endif
+  SymbolInfo SymInfo(&Input, Size, Binding, Type, Visibility, Desc,
+                     /*isBitcode=*/false);
+  auto AddSymbol = [&Input, IsPostLtoPhase, &NP, Shndx, SymIdx, SymInfo, this,
+                    Value, oldOrigin](ResolveInfo RI) -> LDSymbol * {
+    // insert symbol and resolve it immediately
+    // create an input LDSymbol.
+    LDSymbol *InputSym = makeLDSymbol(nullptr);
+    InputSym->setFragmentRef(FragmentRef::null());
+    InputSym->setSectionIndex(Shndx);
+    InputSym->setSymbolIndex(SymIdx);
+
+    if (ThisModule.getConfig().options().shouldEmitSymbolResolutionReport())
+      ThisModule.getNamePool().getSRI().recordSymbolInfo(InputSym, SymInfo);
+
+    Resolver::Result ResolvedResult = {nullptr, false, false};
+    auto &PM = ThisModule.getPluginManager();
+    DiagnosticPrinter *DP = ThisConfig.getPrinter();
+    auto OldErrorCount = DP->getNumErrors() + DP->getNumFatalErrors();
+    PM.callVisitSymbolHook(InputSym, RI.getName(), SymInfo);
+    auto NewErrorCount = DP->getNumErrors() + DP->getNumFatalErrors();
+    if (NewErrorCount != OldErrorCount)
+      return nullptr;
+    bool S =
+        NP.insertNonLocalSymbol(RI, *InputSym, IsPostLtoPhase, ResolvedResult);
+    // Resolve symbol
+    if (!S)
+      return nullptr;
+    // the return ResolveInfo should not nullptr
+    assert(nullptr != ResolvedResult.Info);
+    if (ThisConfig.options().cref() || ThisConfig.options().buildCRef())
+      addToCref(Input, ResolvedResult);
+
+    InputSym->setResolveInfo(*(ResolvedResult.Info));
+    if (ResolvedResult.Overriden || !ResolvedResult.Existent) {
+      ResolvedResult.Info->setValue(Value, false);
+      Input.setNeeded();
+      // Mark this library as needed if the symbol resolver selected the current
+      // symbol and the old symbol is not from a shared library or from a needed
+      // shared library
+      if (ResolvedResult.Overriden && oldOrigin) {
+        ELFFileBase *oldOriginELFBase = llvm::dyn_cast<ELFFileBase>(oldOrigin);
+        if (!oldOrigin->isDynamicLibrary() ||
+            (oldOriginELFBase && oldOriginELFBase->isELFNeeded()))
+          Input.setUsed(true);
+      }
+      NP.addSharedLibSymbol(InputSym);
+    }
+    if (ResolvedResult.Overriden && ResolvedResult.Info->outSymbol()) {
+      ResolvedResult.Info->setOutSymbol(InputSym);
+    }
+    // If the symbol is from dynamic library and we are not making a dynamic
+    // library, we either need to export the symbol by dynamic list or sometimes
+    // we export it since the dynamic library may be referring it defined in
+    // executable, either case it must be in .dynsym
+    ResolveInfo *InputSymRI = InputSym->resolveInfo();
+    LDSymbol *OutSym = InputSymRI->outSymbol();
+    if (ThisConfig.codeGenType() != LinkerConfig::DynObj &&
+        ((OutSym && OutSym->hasFragRef()) || InputSymRI->isCommon()))
+      InputSymRI->setExportToDyn();
+    return InputSym;
+  };
+
+#ifdef ELD_ENABLE_SYMBOL_VERSIONING
+  // foo
+  LDSymbol *SymbolWithoutVerName = nullptr;
+  // foo@VerName
+  LDSymbol *CanonicalSymbol = nullptr;
+  if (IsDefaultVersionedSymbol) {
+    SymbolWithoutVerName = AddSymbol(InputSymbolResolveInfo);
+    if (!SymbolWithoutVerName)
+      return nullptr;
+    DynObjFile->addNonCanonicalSymbol(SymbolWithoutVerName);
+  }
+  if (OptVersionedName)
+    InputSymbolResolveInfo.setName(Saver.save(OptVersionedName.value()));
+  CanonicalSymbol = AddSymbol(InputSymbolResolveInfo);
+  if (!CanonicalSymbol)
+    return nullptr;
+  if (SymbolWithoutVerName && CanonicalSymbol)
+    VersionedSymbols.push_back({CanonicalSymbol, SymbolWithoutVerName});
+  return CanonicalSymbol;
+#else
+  LDSymbol *Sym = AddSymbol(InputSymbolResolveInfo);
+  return Sym;
+#endif
+}
+
+void IRBuilder::addToCref(InputFile &Input, Resolver::Result PResult) {
+  eld::RegisterTimer T("Add Symbols to Cross Reference Table",
+                       "Symbol Resolution",
+                       ThisConfig.options().printTimingStats());
+
+  GeneralOptions &Options = ThisConfig.options();
+  GeneralOptions::CrefTableType &Table = Options.crefTable();
+  ResolveInfo *Info = PResult.Info;
+
+  assert(nullptr != Info);
+
+  std::vector<std::pair<const InputFile *, bool>> &RHS = Table[Info];
+  if (PResult.Overriden == true && Info->isDefine()) {
+    // we add symbol to cref in front if it is defined in this file
+    RHS.insert(RHS.begin(),
+               std::pair<const InputFile *, bool>(&Input, Info->isBitCode()));
+  } else {
+    // otherwise we simply add it to the end.
+    RHS.push_back(
+        std::pair<const InputFile *, bool>(&Input, Info->isBitCode()));
+  }
+}
+
+void IRBuilder::addLinkerInternalLocalSymbol(InputFile *F, std::string Name,
+                                             FragmentRef *FragRef,
+                                             size_t Size) {
+  LDSymbol *Sym = addSymbol<Force, Resolve>(
+      F, Name, ResolveInfo::NoType, ResolveInfo::Define, ResolveInfo::Local,
+      Size, 0, FragRef, ResolveInfo::Default, true);
+  getModule().addSymbol(Sym->resolveInfo());
+}
+
+/// addRelocation - add a relocation entry
+///
+/// All symbols should be read and resolved before calling this function.
+Relocation *IRBuilder::addRelocation(const Relocator *CurRelocator,
+                                     ELFSection *CurSection,
+                                     Relocation::Type Type, LDSymbol &PSym,
+                                     uint32_t POffset,
+                                     Relocation::Address CurAddend) {
+
+  ResolveInfo *ResolveInfo = PSym.resolveInfo();
+
+  if (!ResolveInfo)
+    return nullptr;
+
+  FragmentRef *FragRef = FragmentRef::null();
+  if (CurSection->hasSectionData()) {
+    Fragment *Frag = CurSection->getFrontFragment();
+    FragRef = make<FragmentRef>(*Frag, POffset);
+  }
+  Relocation *Relocation =
+      Relocation::Create(Type, CurRelocator->getSize(Type), FragRef, CurAddend);
+
+  Relocation->setSymInfo(PSym.resolveInfo());
+
+  return Relocation;
+}
+
+Relocation *IRBuilder::addRelocation(const Relocator *CurRelocator,
+                                     Fragment &CurFrag, Relocation::Type Type,
+                                     LDSymbol &PSym, uint32_t POffset,
+                                     Relocation::Address CurAddend) {
+
+  ResolveInfo *ResolveInfo = PSym.resolveInfo();
+
+  if (!ResolveInfo)
+    return nullptr;
+
+  if (!PSym.hasFragRef() && ResolveInfo::Section == ResolveInfo->type() &&
+      ResolveInfo::Undefined == ResolveInfo->desc())
+    return nullptr;
+
+  FragmentRef *FragRef = make<FragmentRef>(CurFrag, POffset);
+
+  Relocation *Relocation =
+      Relocation::Create(Type, CurRelocator->getSize(Type), FragRef, CurAddend);
+
+  Relocation->setSymInfo(PSym.resolveInfo());
+
+  return Relocation;
+}
+
+Relocation *IRBuilder::createRelocation(const Relocator *CurRelocator,
+                                        Fragment &CurFrag,
+                                        Relocation::Type Type, LDSymbol &PSym,
+                                        uint32_t POffset,
+                                        Relocation::Address CurAddend) {
+
+  ResolveInfo *ResolveInfo = PSym.resolveInfo();
+
+  if (!ResolveInfo)
+    return nullptr;
+
+  if (!PSym.hasFragRef() && ResolveInfo::Section == ResolveInfo->type() &&
+      ResolveInfo::Undefined == ResolveInfo->desc())
+    return nullptr;
+
+  FragmentRef *FragRef = make<FragmentRef>(CurFrag, POffset);
+
+  Relocation *Relocation =
+      make<eld::Relocation>(CurRelocator, Type, FragRef, CurAddend);
+
+  Relocation->setSymInfo(PSym.resolveInfo());
+
+  return Relocation;
+}
+
+/// addSymbol - define an output symbol and override it immediately
+template <>
+LDSymbol *IRBuilder::addSymbol<IRBuilder::Force, IRBuilder::Unresolve>(
+    InputFile *Input, std::string SymbolName, ResolveInfo::Type Type,
+    ResolveInfo::Desc Desc, ResolveInfo::Binding Binding,
+    ResolveInfo::SizeType Size, LDSymbol::ValueType Value,
+    FragmentRef *CurFragmentRef, ResolveInfo::Visibility Visibility,
+    bool IsPostLtoPhase, bool IsBitCode) {
+  ResolveInfo *Info = ThisModule.getNamePool().findInfo(SymbolName);
+  LDSymbol *OutputSym = nullptr;
+  if (nullptr == Info) {
+    // the symbol is not in the pool, create a new one.
+    // create a ResolveInfo
+    Resolver::Result Result;
+    bool S = ThisModule.getNamePool().insertSymbol(
+        Input, SymbolName, false, Type, Desc, Binding, Size, Value, Visibility,
+        nullptr, Result, IsPostLtoPhase, IsBitCode, 0, ThisModule.getPrinter());
+    if (!S)
+      return nullptr;
+    assert(!Result.Existent);
+
+    // create a output LDSymbol
+    OutputSym = makeLDSymbol(Result.Info);
+    Result.Info->setOutSymbol(OutputSym);
+  } else {
+    // the symbol is already in the pool, override it
+    ResolveInfo OldInfo;
+    if (ThisConfig.showLinkerScriptWarnings() && !Info->isUndef())
+      ThisConfig.raise(Diag::warning_override_symbol)
+          << SymbolName << Input->getInput()->decoratedPath()
+          << Info->getResolvedPath();
+    OldInfo.override(*Info);
+
+    Info->setRegular();
+    Info->setType(Type);
+    Info->setDesc(Desc);
+    Info->setBinding(Binding);
+    Info->setVisibility(Visibility);
+    Info->setIsSymbol(true);
+    Info->setSize(Size);
+
+    // create a output LDSymbol
+    OutputSym = makeLDSymbol(Info);
+    Info->setOutSymbol(OutputSym);
+  }
+
+  if (nullptr != OutputSym) {
+    OutputSym->setFragmentRef(CurFragmentRef);
+    OutputSym->setValue(Value, false);
+  }
+
+  if (ThisModule.getConfig().options().shouldEmitSymbolResolutionReport()) {
+    SymbolResolutionInfo &SRI = ThisModule.getNamePool().getSRI();
+    SRI.recordSymbolInfo(OutputSym,
+                         SymbolInfo{Input, Size, Binding, Type, Visibility,
+                                    Desc, /*isBitcode=*/false});
+  }
+
+  return OutputSym;
+}
+
+/// addSymbol - define an output symbol and override it immediately
+template <>
+LDSymbol *IRBuilder::addSymbol<IRBuilder::AsReferred, IRBuilder::Unresolve>(
+    InputFile *Input, std::string SymbolName, ResolveInfo::Type Type,
+    ResolveInfo::Desc Desc, ResolveInfo::Binding Binding,
+    ResolveInfo::SizeType Size, LDSymbol::ValueType Value,
+    FragmentRef *CurFragmentRef, ResolveInfo::Visibility Visibility,
+    bool IsPostLtoPhase, bool IsBitCode) {
+  ResolveInfo *Info = ThisModule.getNamePool().findInfo(SymbolName);
+
+  if (nullptr == Info || !(Info->isUndef() || Info->isDyn())) {
+    // only undefined symbol and dynamic symbol can make a reference.
+    return nullptr;
+  }
+
+  // the symbol is already in the pool, override it
+  ResolveInfo OldInfo;
+  OldInfo.override(*Info);
+
+  Info->setRegular();
+  Info->setType(Type);
+  Info->setDesc(Desc);
+  Info->setBinding(Binding);
+  Info->setVisibility(Visibility);
+  Info->setIsSymbol(true);
+  Info->setSize(Size);
+  if (!Info->resolvedOrigin())
+    Info->setResolvedOrigin(Input);
+
+  LDSymbol *OutputSym = Info->outSymbol();
+  if (nullptr != OutputSym) {
+    OutputSym->setFragmentRef(CurFragmentRef);
+    OutputSym->setValue(Value, false);
+  } else {
+    // create a output LDSymbol
+    OutputSym = makeLDSymbol(Info);
+    Info->setOutSymbol(OutputSym);
+  }
+
+  return OutputSym;
+}
+
+/// addSymbol - define an output symbol and resolve it
+/// immediately
+template <>
+LDSymbol *IRBuilder::addSymbol<IRBuilder::Force, IRBuilder::Resolve>(
+    InputFile *Input, std::string SymbolName, ResolveInfo::Type Type,
+    ResolveInfo::Desc Desc, ResolveInfo::Binding Binding,
+    ResolveInfo::SizeType Size, LDSymbol::ValueType Value,
+    FragmentRef *CurFragmentRef, ResolveInfo::Visibility Visibility,
+    bool IsPostLtoPhase, bool IsBitCode) {
+  // Result is <info, existent, override>
+  Resolver::Result Result;
+  ResolveInfo OldInfo;
+
+  bool S = ThisModule.getNamePool().insertSymbol(
+      Input, SymbolName, false, Type, Desc, Binding, Size, Value, Visibility,
+      &OldInfo, Result, IsPostLtoPhase, IsBitCode, 0, ThisModule.getPrinter());
+
+  if (!S)
+    return nullptr;
+
+  LDSymbol *OutputSym = Result.Info->outSymbol();
+  bool HasOutputSym = (nullptr != OutputSym);
+
+  if (!Result.Existent || !HasOutputSym) {
+    OutputSym = makeLDSymbol(Result.Info);
+    Result.Info->setOutSymbol(OutputSym);
+  }
+
+  if (Result.Overriden || !HasOutputSym) {
+    OutputSym->setFragmentRef(CurFragmentRef);
+    OutputSym->setValue(Value, false);
+  }
+
+  return OutputSym;
+}
+
+/// defineSymbol - define an output symbol and resolve it immediately.
+template <>
+LDSymbol *IRBuilder::addSymbol<IRBuilder::AsReferred, IRBuilder::Resolve>(
+    InputFile *Input, std::string SymbolName, ResolveInfo::Type Type,
+    ResolveInfo::Desc Desc, ResolveInfo::Binding Binding,
+    ResolveInfo::SizeType Size, LDSymbol::ValueType Value,
+    FragmentRef *CurFragmentRef, ResolveInfo::Visibility Visibility,
+    bool IsPostLtoPhase, bool IsBitCode) {
+  ResolveInfo *Info = ThisModule.getNamePool().findInfo(SymbolName);
+
+  if (nullptr == Info || !(Info->isUndef() || Info->isDyn())) {
+    // only undefined symbol and dynamic symbol can make a reference.
+    return nullptr;
+  }
+
+  return addSymbol<Force, Resolve>(Input, SymbolName, Type, Desc, Binding, Size,
+                                   Value, CurFragmentRef, Visibility,
+                                   IsPostLtoPhase, IsBitCode);
+}
+
+#ifdef ELD_ENABLE_SYMBOL_VERSIONING
+namespace {
+/// True if `X` and `Y` describe the same underlying input definition.
+///
+/// Comparison is by resolved origin AND FragmentRef value (frag, offset).
+/// Pointer-equality on FragmentRef would always be false here because each
+/// LDSymbol gets its own make<FragmentRef>(...). LDSymbol::value() is NOT
+/// finalized until layout, so it is intentionally not compared.
+static bool sameDefinition(LDSymbol *X, LDSymbol *Y) {
+  if (!X || !Y)
+    return false;
+  ResolveInfo *RX = X->resolveInfo();
+  ResolveInfo *RY = Y->resolveInfo();
+  if (!RX || !RY)
+    return false;
+  if (RX->resolvedOrigin() != RY->resolvedOrigin())
+    return false;
+  FragmentRef *FX = X->fragRef();
+  FragmentRef *FY = Y->fragRef();
+  if (!FX || !FY)
+    return false;
+  return *FX == *FY;
+}
+} // namespace
+
+void IRBuilder::normalizeSymbols() {
+  std::unordered_map<ResolveInfo *, ResolveInfo *> RIReplacementMap;
+  GNULDBackend &Backend = ThisModule.getBackend();
+  NamePool &NP = ThisModule.getNamePool();
+  bool IsPostLtoPhase = ThisModule.isPostLTOPhase();
+
+  for (const auto &P : VersionedSymbols) {
+    LDSymbol *LDSym_canon = P.first;
+    LDSymbol *LDSym_noncanon = P.second;
+    assert(LDSym_canon && LDSym_noncanon && "must not be null!");
+
+    ResolveInfo *RI_canon = LDSym_canon->resolveInfo();
+    ResolveInfo *RI_noncanon = LDSym_noncanon->resolveInfo();
+    assert(RI_canon && RI_noncanon && "must not be null!");
+    // The canonical and non-canonical halves of a pair always carry distinct
+    // names (e.g. `bar@V1` vs `bar`), so they must resolve to distinct NamePool
+    // RIs.
+    assert(RI_canon != RI_noncanon && "degenerate pair sharing one RI");
+    LDSymbol *canonWinner = RI_canon->outSymbol();
+    LDSymbol *nonCanonWinner = RI_noncanon->outSymbol();
+    // A null winner means the half is a versioned symbol pulled from a shared
+    // library that no relocatable object referenced: eld only materializes a
+    // ResolveInfo::outSymbol for a DSO symbol once an object uses it, so an
+    // unreferenced DSO alias keeps a null outSymbol. There is no output symbol
+    // to rewrite, so skip the pair.
+    if (!canonWinner || !nonCanonWinner)
+      continue;
+
+    bool canonHeldByA = (canonWinner == LDSym_canon);
+    bool nonCanonHeldByA = (nonCanonWinner == LDSym_noncanon);
+
+    // The plain `bar` (non-canonical) and default `bar@V1` (canonical) slots
+    // denote one logical symbol and must collapse to a single winner.
+    if (sameDefinition(canonWinner, nonCanonWinner)) {
+      // One definition backs both slots, so there is no precedence to resolve.
+      // If neither slot is held by this pair, an external default-versioned
+      // definition won both and its own pair performs the collapse — skip to
+      // avoid double-collapsing. Otherwise (this pair's own body backs both)
+      // fall through to the collapse below.
+      if (!canonHeldByA && !nonCanonHeldByA)
+        continue;
+    } else {
+      // Two different definitions competed for the two slots.
+      bool NonCanonOverrode =
+          NP.resolvePair(*RI_canon, *RI_noncanon, IsPostLtoPhase);
+      if (NonCanonOverrode)
+        RI_canon->setOutSymbol(nonCanonWinner);
+    }
+    RI_canon->setDefaultVersion(true);
+    if (RI_noncanon->exportToDyn())
+      RI_canon->setExportToDyn();
+    Backend.addNonCanonicalVersionedSym(RI_noncanon);
+    RIReplacementMap[RI_noncanon] = RI_canon;
+  }
+
+  const auto &ObjectFiles = ThisModule.getObjectList();
+  const auto &DynObjectFiles = ThisModule.getDynLibraryList();
+
+  std::vector<InputFile *> AllInputs;
+  AllInputs.insert(AllInputs.end(), ObjectFiles.begin(), ObjectFiles.end());
+  AllInputs.insert(AllInputs.end(), DynObjectFiles.begin(),
+                   DynObjectFiles.end());
+
+  for (InputFile *Input : AllInputs) {
+    if (ObjectFile *ObjFile = llvm::dyn_cast<ObjectFile>(Input)) {
+      for (LDSymbol *Sym : ObjFile->getSymbols()) {
+        ResolveInfo *RI = Sym->resolveInfo();
+        auto it = RIReplacementMap.find(RI);
+        if (it != RIReplacementMap.end())
+          Sym->setResolveInfo(*(it->second));
+      }
+    }
+
+    if (ELFFileBase *ELFFile = llvm::dyn_cast<ELFFileBase>(Input)) {
+      for (LDSymbol *NonCanonicalSym : ELFFile->getNonCanonicalSymbols()) {
+        ResolveInfo *NonCanonicalRI = NonCanonicalSym->resolveInfo();
+        auto it = RIReplacementMap.find(NonCanonicalRI);
+        if (it != RIReplacementMap.end())
+          NonCanonicalSym->setResolveInfo(*(it->second));
+      }
+    }
+  }
+}
+#endif

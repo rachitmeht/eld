@@ -1,0 +1,797 @@
+# Changelog
+All notable behavior changes in this repository are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), adapted to weekly buckets instead of release tags.
+
+## Table of Contents
+
+### Highlights
+- [Release Markers](#release-markers)
+- [Major Highlights](#major-highlights)
+
+### 2026
+- [September 2026](#september-2026)
+- [August 2026](#august-2026)
+- [July 2026](#july-2026)
+- [June 2026](#june-2026)
+- [May 2026](#may-2026)
+- [April 2026](#april-2026)
+- [March 2026](#march-2026)
+- [February 2026](#february-2026)
+- [January 2026](#january-2026)
+
+### 2025
+- [December 2025](#december-2025)
+- [November 2025](#november-2025)
+- [October 2025](#october-2025)
+- [September 2025](#september-2025)
+- [August 2025](#august-2025)
+- [July 2025](#july-2025)
+- [June 2025](#june-2025)
+- [May 2025](#may-2025)
+- [April 2025](#april-2025)
+- [March 2025](#march-2025)
+
+## Release Markers
+
+- `release/22.x` (released 2026-03-14)
+
+## Major Highlights
+
+### 2026
+
+- added initial i386 ELF32 support, expanded ARM relocation and `e_flags` handling, added versioned-symbol and TLS improvements, and introduced JSON symbol-resolution reports.
+- added overlay layout support, `--trace=plugin`, `--default-symver`, `--warn-rwx-segments`, and improved RISC-V, ARM, and TLS relaxation behavior.
+- added multi-threaded output emission, dynamic-section fragmentization, embedded linker-script version blocks, and broader relocation support.
+- added versioned symbols in regular objects, ARM static IFunc support, RISC-V Qualcomm relocations, `--no-warn-mismatch`, and improved ELF format detection.
+- added fat LTO-object support, new plugin relocation API surface, and x86 IE-mode TLS relocation support in shared objects.
+- hardened linker-script behavior (`EXCLUDE_FILE` in `SORT_*`, `ASCIZ`, stricter `SUBALIGN` validation) and fixed multiple versioning/address-layout issues.
+- added `-z separate-loadable-segments`, fixed PIE handling for absolute `--defsym`, and improved AArch64 static TLS/IFunc support.
+
+### 2025
+
+- major x86_64 dynamic-linking improvements (PLT/GOT/.rela.plt, TLSGD/TLSLD, IRELATIVE/ifunc), plus initial shared-library symbol versioning support.
+- substantial linker-script and diagnostics hardening, plus RISC-V `TLSDESC` and `DriverFlavor` support.
+- foundational feature ramp-up across emulations, plugin APIs, x86_64 static relocations, and linker-script expression handling.
+
+## 2026
+
+### September 2026
+
+#### [2026-09-28] - 2026-09-28 to 2026-10-04
+##### Added
+- [ARM] Show ELF `e_flags` in map files and target emulation.
+##### Fixed
+- Fix reproduce replay for `-l` namespec shared libraries.
+
+#### [2026-09-21] - 2026-09-21 to 2026-09-27
+##### Added
+- Add minimal i386 ELF32 backend and i386 driver recognition.
+- [ARM][AArch64] Add `--pic-veneer` support.
+- Add `--emit-symbol-resolution-report` JSON output.
+- Implement ARM `R_ARM_LDRS_PC_G0` and `R_ARM_LDRS_PC_G1` relocations.
+##### Changed
+- Apply version scripts to linker-script symbols.
+- Show additional information in relocation overflow diagnostics.
+##### Fixed
+- Use the lowest-address `PT_TLS` segment as the TLS symbol base.
+- Ignore the addend in `R_RISCV_GOT_HI20`.
+
+#### [2026-09-14] - 2026-09-14 to 2026-09-20
+##### Added
+- Allow local versioned symbols.
+- Add support for TLS offsets across multiple `PT_TLS` segments on x86_64.
+- Add ARM `R_ARM_LDR_PC_G1` and `R_ARM_THM_PC12` relocations.
+##### Changed
+- Allocate GOT/PLT slots into one shared section deterministically.
+- Adapt option tables to the LLVM `OptTable` API.
+##### Fixed
+- Fix out-of-bounds handling when adding exidx sentinel entries.
+- Honor linker-script start addresses on x86.
+
+#### [2026-09-07] - 2026-09-07 to 2026-09-13
+##### Added
+- Add macOS as a host platform for ELD.
+##### Changed
+- Route assignment trace diagnostics to stderr.
+##### Fixed
+- Fix a data race in multi-threaded version-script matching.
+- Fix the `--noinhibit-exec` diagnostic path for output-section `ALIGN`.
+
+### August 2026
+
+#### [2026-08-31] - 2026-08-31 to 2026-09-06
+##### Added
+- Add initial `OVERLAY` VMA/LMA layout support.
+- Add a dynamic H2+Picolibc template for ELF outputs.
+##### Changed
+- Make `--discard-locals` discard `.L` local temporaries.
+- Group obsolete driver options under compatibility/ignored options.
+##### Removed
+- Remove Hexagon linker relaxation support.
+
+#### [2026-08-24] - 2026-08-24 to 2026-08-30
+##### Added
+- Support `ENTRY` inside the `SECTIONS` linker-script command.
+- Add `--default-symver`.
+- Implement ARM `R_ARM_THM_PC8`, `R_ARM_ALU_PC_Gn`, `R_ARM_ALU_PC_Gn_NC`, and `R_ARM_LDR_PC_G2` relocations.
+##### Changed
+- Show the referenced symbol in relocation overflow diagnostics.
+- Correctly handle `--no-merge-strings`.
+##### Fixed
+- Fix RISC-V call-relaxation rollback offsets.
+
+#### [2026-08-17] - 2026-08-17 to 2026-08-23
+##### Added
+- Make `--remap-inputs-file` reproduce tarballs replayable.
+- Honor `--time-region=all-user-plugins` for YAML plugin configurations.
+##### Changed
+- Set linker state before layout and output writing.
+
+#### [2026-08-10] - 2026-08-10 to 2026-08-16
+##### Added
+- Add scoped plugin tracing with `--trace=plugin=<name>`.
+##### Changed
+- Make plugin `-plugin-opt=O2/3` handling more compatible with lld.
+##### Fixed
+- Fix ARM THM veneer mapping symbols.
+- Fix symbol-versioning section layout order.
+- Fix RISC-V post-`ALIGN` JAL rollback handling.
+
+#### [2026-08-03] - 2026-08-03 to 2026-08-09
+##### Added
+- Add `-v` driver option for GNU ld/ld.lld compatibility.
+##### Changed
+- Roll back AUIPC+JALR to JAL when it becomes out of range after `ALIGN`.
+##### Removed
+- Remove `--patch-enable` and the patching infrastructure.
+##### Fixed
+- Fix TLS template size with multiple padded `PT_TLS` segments.
+
+### July 2026
+
+#### [2026-07-27] - 2026-07-27 to 2026-08-02
+##### Added
+- Support `VERSION {}` blocks embedded in `-T` linker scripts.
+- Add `--[no-]warn-rwx-segments`.
+- Honor `--export-dynamic` for PIE executables.
+##### Changed
+- Make version-script pattern matching multi-threaded.
+- Change version information to match Linux kernel expectations.
+##### Fixed
+- Fix LMA alignment when section-description `ALIGN()` is used with `AT>`.
+
+#### [2026-07-20] - 2026-07-20 to 2026-07-26
+##### Added
+- Add multi-threaded output-file emission.
+- Accept weak hidden/protected undefined symbols when building shared objects.
+##### Changed
+- Read linker-script assignments in input-script order.
+- Make symbol-table order deterministic.
+##### Fixed
+- Fix missing alignment on dynamic-section fragments.
+- Fix missing mutex protection for x86_64 `R_X86_64_PLT32` scanning.
+
+#### [2026-07-13] - 2026-07-13 to 2026-07-19
+##### Added
+- Add `iplt_start`/`iplt_end` standard symbols when referenced.
+- Add ARM EXIDX sentinel and fragment support.
+##### Changed
+- Convert `.dynstr`, `.dynsym`, and `.dynamic` to fragment-based designs.
+- Fix evaluation order for `(before/in/after)-SECTIONS` assignments.
+##### Fixed
+- Fix orphan-section placement with linker scripts.
+- Prevent compressed-section reads from reaching an unavailable zlib decompressor.
+
+#### [2026-07-06] - 2026-07-06 to 2026-07-12
+##### Added
+- Implement RISC-V GOT-load relaxation and the Qualcomm Xqccmt vendor extension.
+- Add AArch64 relocation alignment and range checks.
+##### Changed
+- Make symbol-table order deterministic.
+- Treat non-alloc sections as address zero during layout.
+##### Fixed
+- Fix `__start`/`__stop` magic symbols incorrectly emitting `GLOB_DAT`.
+- Fix ARM EXIDX sorting with per-section linker-script rules.
+
+### June 2026
+
+#### [2026-06-29] - 2026-06-29 to 2026-07-05
+##### Added
+- Support x86_64 `GOTPCRELX` relaxation.
+- Add ARM `R_ARM_LDR_PC_G0` relocation.
+##### Changed
+- Support `/dev/null` output files on Windows.
+##### Fixed
+- Fix AArch64 `TLSDESC_ADD_LO12` encoding and relaxation for non-preemptible symbols.
+- Apply plugin fragment replacements before synchronizing relocations.
+
+#### [2026-06-22] - 2026-06-22 to 2026-06-28
+##### Added
+- Relax RISC-V `QC.E.J`/`QC.E.JAL` to `CM.JT`/`CM.JALT` when possible.
+- Add AArch64 overflow checks for `R_AARCH64_ADR_PREL_PG_HI21`.
+##### Changed
+- Unify default `--warn-mismatch` behavior across architectures.
+- Remove internal use of deprecated command-line flags.
+##### Fixed
+- Fix `--remap-inputs` path normalization on Windows.
+- Fix AArch64 absolute-relocation regression and RISC-V JVT symbols.
+- Fix `PT_TLS` file/memory sizes and `.tbss` RELRO classification.
+
+#### [2026-06-15] - 2026-06-15 to 2026-06-21
+##### Added
+- Add primitive support for versioned symbols in regular object files.
+- Add `eld::plugin::InputFile::isLTOGeneratedObject`.
+- Implement RISC-V `R_RISCV_QC_ACCESS_16` and `R_RISCV_QC_ACCESS_32` relaxation.
+##### Changed
+- Make the last conflicting command-line option take precedence.
+##### Fixed
+- Correct GNU-compatible `dc` and `dp` flag definitions.
+
+#### [2026-06-08] - 2026-06-08 to 2026-06-14
+##### Added
+- Add RISC-V Zcmt extension support.
+- Add ARM IFunc support for static links.
+- Add `--no-warn-mismatch` for ABI information.
+##### Changed
+- Remove ARM/Baremetal `--compact` and `-z compactdyn` options.
+##### Fixed
+- Fix spurious `PT_LOAD` creation for TBSS-only sections.
+- Reject `riscv-tbljal` with shared or position-independent links.
+
+#### [2026-06-01] - 2026-06-01 to 2026-06-07
+##### Added
+- Add `LinkerWrapper::getRuleMatchingInput`.
+- Add RISC-V `R_RISCV_QC_ACCESS_16` and `R_RISCV_QC_ACCESS_32` relocation support.
+##### Changed
+- Read ELF inputs according to their actual bit width and endianness.
+- Improve command-line help for canonical `--word` options and compatibility aliases.
+##### Fixed
+- Add column numbers to linker-script diagnostics.
+- Fix duplicate `MEMORY` entries and add `PHDRS` to map files.
+
+### May 2026
+
+#### [2026-05-25] - 2026-05-25 to 2026-05-31
+##### Changed
+- No net user-visible linker behavior changes this week; commits were primarily workflow and test maintenance.
+
+#### [2026-05-18] - 2026-05-18 to 2026-05-24
+##### Added
+- [plugin-api] Add `LinkerWrapper::doRelocation`.
+- [fatlto] Diagnose invalid/empty embedded bitcode.
+- [X86] Emit `R_X86_64_TPOFF64` for IE-mode TLS in shared objects.
+##### Changed
+- Remove unnecessary sorting of input sections.
+##### Fixed
+- Unknown `-z` sub-options now warn (instead of error) for consistency with other unknown options.
+
+#### [2026-05-11] - 2026-05-11 to 2026-05-17
+##### Added
+- [LTO] Support fat LTO objects.
+- Add support for `-Wno-whole-archive`.
+- [Hexagon] Add V93 support.
+##### Changed
+- Make output relocation section order deterministic.
+- Replace `xxHash64` with `xxh3_64bits` and remove `HashUtils`.
+##### Removed
+- Remove deprecated `LinkerScriptRule` chunk APIs.
+
+#### [2026-05-04] - 2026-05-04 to 2026-05-10
+##### Changed
+- Detect incompatible input files in `ELFDynObjParser`.
+##### Fixed
+- Fix `ELFObjectWriter::emitRelocation`.
+- Fix windows build failures.
+##### Removed
+- Remove `AtTable` support and remaining `AtSection` plumbing.
+
+### April 2026
+
+#### [2026-04-27] - 2026-04-27 to 2026-05-03
+##### Added
+- Add support for `extern "C++"` in version scripts.
+##### Fixed
+- Fix build errors seen with `-fno-permissive`.
+- Fix windows test failures.
+
+#### [2026-04-20] - 2026-04-20 to 2026-04-26
+##### Fixed
+- Emit an error for non-power-of-2 `SUBALIGN` values.
+- Fix incorrect version assignment to undefined symbols.
+- Fix response-file generation for namespec-resolved libraries.
+- Fix `AArch64Relocator::isRelocSupported`.
+
+#### [2026-04-13] - 2026-04-13 to 2026-04-19
+##### Added
+- Accept single- and double-dash forms of `pie`/`no-pie`.
+- Support `ASCIZ` escapes and reject invalid hex escapes in linker scripts.
+##### Changed
+- Update `ASCIZ` syntax and map-file output behavior.
+##### Fixed
+- Correct `.gnu.hash` computation for versioned symbols.
+- Fix LMA alignment when VMA is not aligned.
+- Skip `NOLOAD` sections in LMA-overlap checks.
+
+#### [2026-04-06] - 2026-04-06 to 2026-04-12
+##### Added
+- Support joined soname argument form: `-h<soname>`.
+- Add trace diagnostics for soname property updates.
+- Add `ASCIZ` linker-script support.
+##### Changed
+- Emit diagnostics for segment assignments when `PHDRS` are absent.
+##### Fixed
+- Fix `ALIGN_WITH_INPUT` overlap when VMA and LMA share a region.
+- Preserve parentheses around output section VMA.
+
+### March 2026
+
+#### [2026-03-30] - 2026-03-30 to 2026-04-05
+##### Added
+- Support `EXCLUDE_FILE` inside `SORT_*` linker-script constructs.
+##### Changed
+- [LTO] Do not delete assembly inputs to LTO.
+##### Fixed
+- Fix incorrect `"Plugin Error"` when PLT/GOT sections are discarded.
+- Fix build with `BUILD_SHARED_LIBS=On`.
+- Fix windows build failure.
+
+#### [2026-03-23] - 2026-03-23 to 2026-03-29
+##### Added
+- Add `InputTarReader` and plugin `TarFile` API for tar lookup.
+- Support `--reproduce=default` and `--reproduce-on-fail=default`.
+##### Fixed
+- Apply ULEB128 fix for clang kernel test failures.
+
+#### [2026-03-16] - 2026-03-16 to 2026-03-22
+##### Changed
+- Align start of tdata
+
+#### [2026-03-09] - 2026-03-09 to 2026-03-15
+##### Added
+- Support -z separate-loadable-segments
+- [hexagon] Add linux emulation
+##### Changed
+- Separate ctors/dtors and init_array/fini_array sections
+##### Fixed
+- Resolve --defsym absolute symbols at link time in PIE links
+
+#### [2026-03-02] - 2026-03-02 to 2026-03-08
+##### Added
+- Improve IFunc support for AArch64 static executables
+- [build] Add external llvm support
+- [AArch64] Static TLS support
+
+### February 2026
+
+#### [2026-02-23] - 2026-02-23 to 2026-03-01
+##### Added
+- [LTO] Add --plugin-opt=stats-file= option
+- [LTO] Add optimization remarks options
+- Add support for parsing SORT(CONSTRUCTORS)
+##### Changed
+- [LTO] Move existing LTO option to the LTO group
+##### Fixed
+- Fix __eh_frame_* symbols
+- [LinkerScript] fix sort constructors
+- [aarch64] Fix TLS IE/GD support
+
+#### [2026-02-16] - 2026-02-16 to 2026-02-22
+##### Added
+- [RISC-V] Add -no-relax-tlsdesc
+- Add support for NEXT_SECTION
+- Add --record-command-line extended linker option
+##### Fixed
+- Fix address of `_GLOBAL_OFFSET_TABLE_`
+
+#### [2026-02-09] - 2026-02-09 to 2026-02-15
+##### Added
+- [LinkerScript] Add support for INSERT AFTER/BEFORE
+- Add --start-lib/--end-lib command line option
+- [AArch64] Add support for R_AARCH64_LD64_GOTPAGE_LO15
+##### Fixed
+- Fix incorrect NEEDED entry due to unneeded shared lib reference
+- Correct sysroot-prepend conditions for script inputs
+- Fix __tbss_offset calculation
+
+#### [2026-02-02] - 2026-02-02 to 2026-02-08
+##### Added
+- Add padding in TLS section for alignment
+- [AArch64] Add support for pointer authentication relocations
+- Add Initializing state to getAllOutputSections link state check
+##### Changed
+- Read merge string sections in parallel
+##### Fixed
+- UndefinedBehaviorSanitizer: signed integer overflow issue runtime error: signed integer overflow: 2147483628 + 2048 cannot be represented in type 'int' fix
+- Fix resolving script inputs path when sysroot is specified
+- [LinkerScript] Fix >RAM AT>RAM placement after RAM AT>ROM
+##### Removed
+- Remove ENABLE_ELD_PLUGIN_SUPPORT and related conditionals
+
+### January 2026
+
+#### [2026-01-26] - 2026-01-26 to 2026-02-01
+##### Added
+- Add support for print cmd
+- Add changes required for H2+Picolibc
+- Add new linker script for H2+Picolibc
+##### Changed
+- Reiterate layout step until section addresses converge
+- Improve help for previously added LTO options
+- Default to Linux Emulation on RISC-V
+##### Fixed
+- Fix crash when AArch64 objects contain unsupported relocations.
+- disable ASSERT macro in non-debug builds
+
+#### [2026-01-19] - 2026-01-19 to 2026-01-25
+##### Fixed
+- Fix crash when image refer to certain kind of symbols
+- Fix `FDEFragment::classof` function
+
+#### [2026-01-12] - 2026-01-12 to 2026-01-18
+##### Added
+- Add --lto-obj-path option and its alias
+##### Changed
+- Handle NOLOAD/TBSS/PROGBITS sections
+##### Fixed
+- Fix ELDExpected windows failure
+
+#### [2026-01-05] - 2026-01-05 to 2026-01-11
+##### Added
+- Add --plugin-opt=save-temps alias for --save-temps
+- Add --thinlto-jobs= option and its alias --plugin-opt=jobs=
+- Add lto-partitions= and --plugin-opt=lto-partitions= options
+- Support `-z separate-code` / `-z noseparate-code`
+##### Changed
+- Update lib/Readers/ELFSection.cpp
+- [RISCV] Use Vendor Reloc Names
+##### Fixed
+- Fix re-evaluation of DEFINED expression
+
+## 2025
+
+### December 2025
+
+#### [2025-12-29] - 2025-12-29 to 2026-01-04
+##### Added
+- Add `-disable-verify` and its plugin-opt alias
+- Add `--lto-cs-profile-generate` and `--lto-cs-profile-file=` options
+##### Fixed
+- Fix parsing of `"archive:mem"` input section description pattern
+
+#### [2025-12-22] - 2025-12-22 to 2025-12-28
+##### Fixed
+- Fix build failure error undeclared CHERIOT1VendorRelocationOffset
+
+#### [2025-12-08] - 2025-12-08 to 2025-12-14
+##### Added
+- Add `-debug-pass-manager` option for LTO (#662)
+
+#### [2025-12-01] - 2025-12-01 to 2025-12-07
+##### Added
+- Add initial support for creating shared library with symbol versioning
+- Add eld tablegen targets to LLVM_COMMON_DEPENDS
+##### Changed
+- [ELFSection] Use sentinel value instead of optional
+- [ArchiveFile] Store symbols by value and avoid storing strings.
+- [ELFSection] Move DependentSections to side table
+##### Fixed
+- Relax static assert in `ELFSection.h`
+
+### November 2025
+
+#### [2025-11-24] - 2025-11-24 to 2025-11-30
+##### Added
+- [ELD][x86-64] Implement IRELATIVE relocations for ifunc support
+- [x86_64] Add support for R_X86_64_TLSLD relocation
+- [x86_64] Add support for R_X86_64_TLSGD relocation
+##### Changed
+- Evaluate output section end symbol assignments in partial link
+- Move PAddr from ELFSection to OutputSectionEntry
+- [x86-64] Copy relocations for absolutely referenced data symbols
+##### Fixed
+- Fix which function to handle spaces in executable paths on Windows
+##### Removed
+- [ELFSection] Remove unnecessary Annotations member.
+
+#### [2025-11-17] - 2025-11-17 to 2025-11-23
+##### Added
+- Add release artifact builder
+- [x86_64] Add R_X86_64_64 dynamic linking handling
+##### Fixed
+- [Relocator] Emit valid ranges in overflow diags (#599)
+- Fix crash due to missing thin archive member
+- Fix invalid 'Referenced Chunk ... deleted' error when printing map-file
+
+#### [2025-11-10] - 2025-11-10 to 2025-11-16
+##### Added
+- Add primitive support for plugin activity log file functionality
+- Support signed 64 bit values in diagnostics.
+- Add guide that describes linker support for backwards compatibility
+##### Changed
+- const GeneralOptions
+##### Fixed
+- Report unbalanced chunk diag even if plugin fails in CreatingSections
+- Fix FileCheck pattern for AbsoluteSymbolRelocation
+- Fix YAML package dependecy and search path related windows failures
+
+#### [2025-11-03] - 2025-11-03 to 2025-11-09
+##### Added
+- x86_64: Implement data call support for dynamic linking
+##### Fixed
+- Fix symbol resolution of EXTERN command symbols
+- Fix crash on printing change out sect plugin op with invalid out sect
+
+### October 2025
+
+#### [2025-10-27] - 2025-10-27 to 2025-11-02
+##### Added
+- x86_64: Implement R_X86_64_PLT32 handling for dynamic linking scenarios
+- x86_64: Add .rela.plt section creation for dynamic linking
+- x86_64: Implement GOTPLTN initialization
+##### Fixed
+- x86_64: Fix PLTN stub instructions
+- Fix classof usage for InputAction subclasses
+
+#### [2025-10-20] - 2025-10-20 to 2025-10-26
+##### Added
+- [Hexagon] V91 support
+##### Changed
+- Update symbols with retain attribute
+- improve memory usage diagnostics
+##### Fixed
+- [RISCV] Fix JAL overflow check
+
+#### [2025-10-13] - 2025-10-13 to 2025-10-19
+##### Added
+- Add Memory and RegionAlias commands in eld::plugin::Script
+- x86_64: Enable creation of .dynamic section
+- Add support for --push-state / --pop-state functionality
+##### Changed
+- Eval AFTER_SECTIONS assignments after assignments within SECTIONS cmd
+- Re-evaluate OUTSIDE_SECTIONS assignments whenever layout resets
+- Divide OUTSIDE_SECTIONS into BEFORE_SECTIONS and AFTER_SECTIONS
+##### Fixed
+- x86_64: Fix PLT0 stub instructions to reference GOTPLT[1] and GOTPLT[2]
+- x86_64: Fix GOTPLT0 to populate .dynamic address correctly
+
+#### [2025-10-06] - 2025-10-06 to 2025-10-12
+##### Added
+- x86_64: Add support for R_X86_64_DTPOFF32 and R_X86_64_DTPOFF32 relocations
+- Add missing cstdint includes
+##### Fixed
+- Fix NOCROSSREFS feature to work when there is no SECTIONS command
+- fix break with llvm tip
+
+### September 2025
+
+#### [2025-09-29] - 2025-09-29 to 2025-10-05
+##### Changed
+- Emit text map-file even when the link crashes
+
+#### [2025-09-22] - 2025-09-22 to 2025-09-28
+##### Added
+- Add ARM, AArch64, RISCV
+##### Changed
+- Define __eh_frame_* symbols as standard symbols
+
+#### [2025-09-15] - 2025-09-15 to 2025-09-21
+##### Added
+- Add __eh_frame_hdr_start/end symbols in template linker script
+- Add support for displaying plugin stats in map file
+##### Fixed
+- Fix -1 e_flags with binary inputs
+- Fix missed code changes for linker detection of non contiguous tls sections
+- Fix linker detection of non contiguous tls sections
+
+#### [2025-09-08] - 2025-09-08 to 2025-09-14
+##### Fixed
+- Fix YamlLayoutPrinter crash when the link contains an empty archive
+
+#### [2025-09-01] - 2025-09-01 to 2025-09-07
+##### Added
+- add reverse iterator github action
+##### Fixed
+- Fix incorrect padding value when both fill expr and command are used
+- Fix DiagnosticEngine deadlock that can happen when the link crashes
+- Fix section hash computation in LW::doesRuleMatchWithSection
+
+### August 2025
+
+#### [2025-08-25] - 2025-08-25 to 2025-08-31
+##### Fixed
+- Fix fragment padding size computation when output section is unaligned
+
+#### [2025-08-18] - 2025-08-18 to 2025-08-24
+##### Added
+- x86_64: Add TLS Local Exec relocations support
+- Add InputFile PluginAPIs
+##### Changed
+- Parse MEMORY command expressions in LexState::Expr
+##### Fixed
+- Fix UnaryOperator expression name
+
+#### [2025-08-11] - 2025-08-11 to 2025-08-17
+##### Added
+- Fixup: Add %opt
+- LTO: Support --lto-sample-profile=
+##### Changed
+- [RISC-V] Sort relocations
+- Driver changes to inferred arch from program name/emulation
+
+#### [2025-08-04] - 2025-08-04 to 2025-08-10
+##### Added
+- Support DriverFlavor
+##### Changed
+- Set emulation mode based on input files
+- Return 0 instead of asserting if expression does not have result
+- Skip invalid ASCII chars when parsing linker script
+##### Fixed
+- Fix assertion failure due to invalid glob pattern in linker script
+- Fix PROVIDE feature for output section prologue expressions
+- [ARM][AArch64] Fix computation of local-exec TLS relocations
+
+### July 2025
+
+#### [2025-07-28] - 2025-07-28 to 2025-08-03
+##### Added
+- [RISC-V] Add support for TLSDESC
+- Add support for section annotations in map file
+- Add a plugin API to add files to reproduce tarball
+##### Changed
+- [RISCV] Handle VENDOR Relocations with emit-relocs
+##### Fixed
+- [LinkerScript] Fix parsing of invalid file and section patterns
+
+#### [2025-07-21] - 2025-07-21 to 2025-07-27
+##### Added
+- Support ALIGN_WITH_INPUT output section attribute
+##### Changed
+- Improve GNU-compatibility of the linker script parser
+##### Fixed
+- Fix reproduce crash when input is passed through linkerscript
+- [LinkerScript] Fix fill padding for certain sections.
+- Fix incorrect evaluation of ternary expression during GC
+
+#### [2025-07-14] - 2025-07-14 to 2025-07-20
+##### Added
+- add sanitizer build
+- Support PIE with TLS
+##### Changed
+- set alignment for loadable and non loadable segments
+- empty segment warning should be delayed to postLayout
+- annotate not provided symbols in the map file
+##### Fixed
+- Fix crash when invalid section is used with 'ALIGNOF' linker script command
+- Fix parsing of ':ALIGN(...)' in linker script
+- Fix mapping file feature for findConfigFile and getFileContents idiom
+
+#### [2025-07-07] - 2025-07-07 to 2025-07-13
+##### Added
+- Add support for bitwise xor operator in linkerscript.
+- Enable reproduce feature for findConfigFile + getFileContents use idiom
+- Add both ternary branch expressions symbols into symbol resolver
+##### Changed
+- Initialize Expression::result as an empty optional object
+- Emit empty segment warning only if linker-script warnings are enabled
+##### Fixed
+- Update checkout step to dynamicall pull the PR branch from the correct source
+- Fix dot file malformed render.
+- Fix DEFINED(...) function evaluation for undef but referenced symbols
+
+### June 2025
+
+#### [2025-06-30] - 2025-06-30 to 2025-07-06
+##### Fixed
+- Report undef symbol reference error for ALIGN linker script expression
+- fix alignment for segments
+- Fix crash on parsing ':ALIGN' in linker script
+
+#### [2025-06-23] - 2025-06-23 to 2025-06-29
+##### Added
+- Add support for GOTPCREL and related relocations for static linking
+- Add R_X86_64_PLT32 static relocation support
+- [RISCV] Implement Relaxations for QC.E.LI/QC.LI
+##### Changed
+- Correctly set hasOutputSection property of output section plugin cmd
+- Switch to an lld-compatible option instead of -codegen=
+##### Fixed
+- Fix x86_64 default image base
+- Fix DT_NEEDED entry for shared libs without SO name
+- Fix incorrect call to `Linker::emit()` with `-emit-timing-stats-in-output` flag
+
+#### [2025-06-16] - 2025-06-16 to 2025-06-22
+##### Added
+- Add output and input section plugin framework APIs
+- Add InputSectionSpec and LinkerScript plugin framework APIs
+- Add ternary condition expression symbol as undefined reference symbol
+##### Changed
+- Return true when symbol table section is missing
+##### Fixed
+- Add -W[no-]error option to convert warnings into errors
+- [RISCV] Fix ANDES Vendor Issue
+
+#### [2025-06-09] - 2025-06-09 to 2025-06-15
+##### Added
+- Add symbols referred by shared libs to dynamic symbol table
+- Add `getLinkerVersion` LinkerWrapper API
+##### Changed
+- silence symbol overrides
+
+#### [2025-06-02] - 2025-06-02 to 2025-06-08
+##### Added
+- Add support for x86_64 emulation options
+- Add a warning for empty segments
+- Add warn diagnostics for zero-sized memory regions
+
+### May 2025
+
+#### [2025-05-26] - 2025-05-26 to 2025-06-01
+##### Added
+- Add `ELD_REGISTER_PLUGIN` macro
+
+#### [2025-05-19] - 2025-05-19 to 2025-05-25
+##### Added
+- support omagic
+##### Changed
+- local symbols that need GOT slot require dynamic relocation
+##### Fixed
+- fix dllexport
+
+#### [2025-05-12] - 2025-05-12 to 2025-05-18
+##### Added
+- [RISCV] Implement Relaxations for QC.E.J/QC.E.JAL
+- [risc-v] Add --no-relax-zero option
+##### Changed
+- Make dynamic string table simpler to use
+##### Fixed
+- Fix dot counter handling for non-alloc sections
+
+#### [2025-05-05] - 2025-05-05 to 2025-05-11
+##### Added
+- Support 'archive: member' file-pattern in input section description
+##### Changed
+- [LinkerScript] Parse symbol assignment inside PROVIDE in LexState::Expr
+
+### April 2025
+
+#### [2025-04-21] - 2025-04-21 to 2025-04-27
+##### Added
+- Add emulation option support for hexagon, arm and aarch64
+- [LinkerScript] Add support for ALIGN_WITH_INPUT
+##### Removed
+- Explicitly disable copying/moving GeneralOptions and export GnuLdDriver
+
+#### [2025-04-14] - 2025-04-14 to 2025-04-20
+##### Added
+- Add exidx_start and exidx_end symbols with PROVIDE_HIDDEN semantics
+- Add FAQ on linker script changes required for TLS functionality
+- Allow --patch-enable and local symbol stripping (#27)
+##### Changed
+- assignments/defsym needs to be processed in link order
+- [riscv] More cases of using PLT address (#41)
+##### Fixed
+- Fix generation of duplicate DT_NEEDED entries
+##### Removed
+- [RISC-V] Disable default attribute mix warnings
+
+#### [2025-04-07] - 2025-04-07 to 2025-04-13
+##### Added
+- Support building eld when BUILD_SHARED_LIBS=On
+- Add primitive support of emulation options with ld.eld
+- Add delimiter to "cannot read" diagnostic
+##### Changed
+- Change sort-section to permit space-delim
+##### Fixed
+- fix name of RISC-V extension
+
+### March 2025
+
+#### [2025-03-31] - 2025-03-31 to 2025-04-06
+##### Added
+- [arm] Support --target2=abs/rel/got-rel
+
+#### [2025-03-10] - 2025-03-10 to 2025-03-16
+##### Added
+- Initial commit.
+- Open-sourced the `eld` linker repository.

@@ -1,0 +1,346 @@
+cmake_minimum_required(VERSION 3.16)
+
+set(CMAKE_COLOR_MAKEFILE ON)
+
+# Option to use external LLVM
+option(ELD_USE_EXTERNAL_LLVM "Use external LLVM installation" OFF)
+set(LLVM_DIR
+    ""
+    CACHE PATH
+          "Path to LLVM CMake directory (e.g., /path/to/llvm/lib/cmake/llvm)")
+
+if(ELD_USE_EXTERNAL_LLVM)
+  # Find external LLVM
+  if(NOT LLVM_DIR)
+    message(FATAL_ERROR "LLVM_DIR must be set when ELD_USE_EXTERNAL_LLVM is ON")
+  endif()
+
+  find_package(LLVM REQUIRED CONFIG PATHS ${LLVM_DIR} NO_DEFAULT_PATH)
+
+  message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+  message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
+  message(STATUS "LLVM definitions: ${LLVM_DEFINITIONS}")
+  message(STATUS "LLVM include dirs: ${LLVM_INCLUDE_DIRS}")
+  message(STATUS "LLVM library dirs: ${LLVM_LIBRARY_DIRS}")
+  message(STATUS "LLVM targets: ${LLVM_TARGETS_TO_BUILD}")
+  message(STATUS "LLVM target triple: ${LLVM_TARGET_TRIPLE}")
+  message(STATUS "LLVM host triple: ${LLVM_HOST_TRIPLE}")
+
+  # Set up LLVM variables
+  list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+  include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
+  link_directories(${LLVM_LIBRARY_DIRS})
+  add_definitions(${LLVM_DEFINITIONS})
+
+  # Set PACKAGE_VERSION for ELD version computation
+  set(PACKAGE_VERSION ${LLVM_PACKAGE_VERSION})
+
+  # Set required LLVM variables
+  set(LLVM_TARGETS_TO_BUILD ${LLVM_TARGETS_TO_BUILD})
+
+  # Handle LLVM_DEFAULT_TARGET_TRIPLE (may be LLVM_TARGET_TRIPLE in newer
+  # versions)
+  if(DEFINED LLVM_DEFAULT_TARGET_TRIPLE)
+    set(LLVM_DEFAULT_TARGET_TRIPLE ${LLVM_DEFAULT_TARGET_TRIPLE})
+  elseif(DEFINED LLVM_TARGET_TRIPLE)
+    set(LLVM_DEFAULT_TARGET_TRIPLE ${LLVM_TARGET_TRIPLE})
+  elseif(DEFINED LLVM_HOST_TRIPLE)
+    set(LLVM_DEFAULT_TARGET_TRIPLE ${LLVM_HOST_TRIPLE})
+  else()
+    message(
+      FATAL_ERROR
+        "Could not determine LLVM_DEFAULT_TARGET_TRIPLE from LLVM installation")
+  endif()
+
+  message(
+    STATUS "Using LLVM_DEFAULT_TARGET_TRIPLE: ${LLVM_DEFAULT_TARGET_TRIPLE}")
+
+  # Include LLVM CMake modules
+  include(AddLLVM)
+  include(TableGen)
+  include(HandleLLVMOptions)
+
+  # Set up compiler flags similar to LLVM
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+  # FIXME : Enable tests For external builds, disable tests by default (requires
+  # LLVM source tree)
+  option(ELD_INCLUDE_TESTS "Include tests in external build" OFF)
+
+else()
+  # Integrated build (within LLVM tree)
+  message(STATUS "Building ELD as part of LLVM")
+  option(ELD_INCLUDE_TESTS "Include tests in integrated build" ON)
+endif()
+
+set(ELD_SOURCE_DIR
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    CACHE STRING "")
+set(ELD_BINARY_DIR
+    ${CMAKE_CURRENT_BINARY_DIR}
+    CACHE STRING "")
+
+set(ELD_TOOLS_INSTALL_DIR
+    "bin"
+    CACHE PATH "Path for binary subdirectory (defaults to 'bin')")
+mark_as_advanced(ELD_TOOLS_INSTALL_DIR)
+
+list(APPEND CMAKE_MODULE_PATH "${ELD_SOURCE_DIR}/cmake/modules")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
+
+include(CMakeRequiredVariablesCheck REQUIRED)
+include(VersionFromLinkerGit)
+include(ELDColorMsg)
+
+set(LINKER_PLUGIN_API_MAJOR_VERSION "4")
+set(LINKER_PLUGIN_API_MINOR_VERSION "0")
+
+# Compute the ELD version from the LLVM version.
+string(REGEX MATCH "[0-9]+\\.[0-9]+(\\.[0-9]+)?" ELD_VERSION ${PACKAGE_VERSION})
+info("ELD version: ${ELD_VERSION}")
+
+string(REGEX REPLACE "([0-9]+)\\.[0-9]+(\\.[0-9]+)?" "\\1" ELD_VERSION_MAJOR
+                     ${ELD_VERSION})
+string(REGEX REPLACE "[0-9]+\\.([0-9]+)(\\.[0-9]+)?" "\\1" ELD_VERSION_MINOR
+                     ${ELD_VERSION})
+
+# Support linker version
+add_version_info_eld_git(ELD_REPOSITORY ELD_REVISION ${ELD_SOURCE_DIR})
+
+if(LLVM_VENDOR_NAME)
+  set(LLVM_VENDOR_NAME ${LLVM_VENDOR_NAME})
+else()
+  info("Use LLVM_VENDOR_NAME to set more vendor name")
+endif()
+
+if(LLVM_VENDOR_VERSION)
+  set(LLVM_VENDOR_VERSION ${LLVM_VENDOR_VERSION})
+else()
+  info("Use LLVM_VENDOR_VERSION to set more vendor version")
+endif()
+
+# Configure Version.inc
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/eld/Config/Version.inc.in
+  ${CMAKE_CURRENT_BINARY_DIR}/include/eld/Config/Version.inc.in @ONLY)
+
+set(ELD_VERSION_PRE_CONFIGURED_FILE
+    ${CMAKE_CURRENT_BINARY_DIR}/include/eld/Config/Version.inc.in)
+set(ELD_VERSION_POST_CONFIGURED_FILE
+    ${CMAKE_CURRENT_BINARY_DIR}/include/eld/Config/Version.inc)
+include(ELDVersionMonitor)
+
+set(ELD_DEFAULT_TARGET_TRIPLE
+    "${LLVM_DEFAULT_TARGET_TRIPLE}"
+    CACHE STRING "Default target for which LLVM will generate code.")
+
+set(ELD_EMULATOR "")
+set(ELD_EMULATOR64 "")
+
+set(ELD_ALL_TARGETS Hexagon AArch64 ARM RISCV X86)
+
+if(ELD_TARGETS_TO_BUILD STREQUAL "all")
+  set(ELD_TARGETS_TO_BUILD ${ELD_ALL_TARGETS})
+endif()
+
+if(NOT ELD_TARGETS_TO_BUILD)
+  set(ELD_TARGETS_TO_BUILD
+      ${LLVM_TARGETS_TO_BUILD}
+      CACHE STRING "ELD Target(Targets) to build")
+endif()
+
+# Set ELD_ENUM_TARGETS
+set(ELD_ENUM_TARGETS_STR "")
+set(ELD_ENUM_LINKERS_STR "")
+set(ELD_DEFINE_TARGETS_STR "")
+foreach(t ${ELD_TARGETS_TO_BUILD})
+  set(ELD_ENUM_TARGETS_STR ${ELD_ENUM_TARGETS_STR} "ELD_TARGET(${t})\n")
+  set(ELD_ENUM_LINKERS_STR ${ELD_ENUM_LINKERS_STR} "ELD_LINKER(${t})\n")
+  string(TOUPPER ${t} TARGET_UPPER)
+  info("ELD built with support for ${t}")
+  set(ELD_ENABLE_TARGET_${TARGET_UPPER}
+      ON
+      CACHE BOOL ON FORCE)
+endforeach()
+
+string(REPLACE ";" "" ELD_ENUM_TARGETS "${ELD_ENUM_TARGETS_STR}")
+string(REPLACE ";" "" ELD_ENUM_LINKERS "${ELD_ENUM_LINKERS_STR}")
+
+configure_file(${ELD_SOURCE_DIR}/include/eld/Config/Targets.def.cmake
+               ${ELD_BINARY_DIR}/include/eld/Config/Targets.def)
+
+# Platform detection
+set(ELD_ON_WIN32 0)
+set(ELD_ON_UNIX 0)
+set(ELD_ON_MSVC 0)
+set(ELD_ON_APPLE 0)
+
+if(WIN32)
+  if(CYGWIN)
+    set(ELD_ON_UNIX 1)
+  else()
+    set(ELD_ON_WIN32 1)
+    set(ELD_ON_MSVC 1)
+  endif()
+elseif(APPLE)
+  set(ELD_ON_UNIX 1)
+  set(ELD_ON_APPLE 1)
+elseif(UNIX)
+  set(ELD_ON_UNIX 1)
+else()
+  message(SEND_ERROR "Unable to determine platform")
+endif()
+
+if(ELD_ON_APPLE)
+  info("Setting up build of ELD for Darwin")
+elseif(ELD_ON_UNIX)
+  info("Setting up build of ELD for Unix")
+else()
+  info("Setting up build of ELD for Windows")
+endif()
+
+# $ORIGIN is ELF-specific; Mach-O uses @loader_path / @rpath.
+if(APPLE)
+  set(CMAKE_MACOSX_RPATH ON)
+  set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+  set(CMAKE_INSTALL_RPATH "@loader_path/../lib")
+elseif(UNIX)
+  set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+  set(CMAKE_INSTALL_RPATH "\$ORIGIN/../lib")
+endif()
+
+# Match LLVM's bin/lib layout so $ORIGIN / @loader_path/../lib resolves in the
+# build tree as well as after install. Integrated LLVM builds already set these.
+if(NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
+if(NOT CMAKE_LIBRARY_OUTPUT_DIRECTORY)
+  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+endif()
+
+# Configure header files
+configure_file(${ELD_SOURCE_DIR}/include/eld/Config/Config.h.cmake
+               ${ELD_BINARY_DIR}/include/eld/Config/Config.h)
+configure_file(${ELD_SOURCE_DIR}/include/eld/Config/Linkers.def.cmake
+               ${ELD_BINARY_DIR}/include/eld/Config/Linkers.def)
+configure_file(${ELD_SOURCE_DIR}/include/eld/Config/Targets.def.cmake
+               ${ELD_BINARY_DIR}/include/eld/Config/Targets.def)
+
+include_directories(
+  BEFORE
+  ${CMAKE_CURRENT_BINARY_DIR}/include
+  ${CMAKE_CURRENT_BINARY_DIR}/include/eld/PluginAPI/
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/eld/PluginAPI/)
+
+option(ELD_COVERAGE "Build ELD with LLVM source-based coverage instrumentation" OFF)
+if(ELD_COVERAGE)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-instr-generate -fcoverage-mapping")
+endif()
+
+option(ELD_SANITIZE "Build ELD with Sanitizer" OFF)
+if(LLVM_USE_SANITIZER OR ELD_SANITIZE)
+  info("Sanitizing Linker for ${LLVM_USE_SANITIZER}")
+  if(LLVM_USE_SANITIZER MATCHES "Undefined")
+    set(BLACKLIST_FILE "${ELD_SOURCE_DIR}/utils/sanitizers/ubsan_blacklist.txt")
+    if(EXISTS "${BLACKLIST_FILE}")
+      append("-fsanitize-blacklist=${BLACKLIST_FILE}" CMAKE_C_FLAGS
+             CMAKE_CXX_FLAGS)
+    endif()
+  endif()
+  if(NOT ELD_SANITIZE)
+    set(ELD_SANITIZE ON)
+  endif()
+  if(LLVM_USE_SANITIZER MATCHES "Thread")
+    set(ELD_THREAD_SANITIZE ON)
+  endif()
+endif()
+
+option(ELD_ENABLE_SYMBOL_VERSIONING "Enable Eld symbol versioning support" OFF)
+if(ELD_ENABLE_SYMBOL_VERSIONING)
+  add_compile_definitions(ELD_ENABLE_SYMBOL_VERSIONING)
+endif()
+
+set(CMAKE_INCLUDE_CURRENT_DIR ON)
+include_directories(BEFORE ${CMAKE_CURRENT_BINARY_DIR}/include
+                    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+if(ELD_USE_EXTERNAL_LLVM)
+  link_directories(${LLVM_LIBRARY_DIRS})
+else()
+  link_directories("${PATH_TO_LLVM_BUILD}/lib")
+endif()
+
+# Apple ld does not search Homebrew's prefix for short -l names. LLVMSupport
+# records zstd as LLVM_SYSTEM_LIBS ("zstd" → -lzstd). In-tree Darwin builds
+# then fail linking libLW with "ld: library 'zstd' not found" even when
+# /opt/homebrew/lib/libzstd.dylib is already on the same link line.
+if(APPLE)
+  foreach(_eld_brew_lib IN ITEMS /opt/homebrew/lib /usr/local/lib)
+    if(EXISTS "${_eld_brew_lib}")
+      link_directories("${_eld_brew_lib}")
+    endif()
+  endforeach()
+endif()
+
+add_subdirectory(include)
+
+# After the driver option TableGen targets are created
+get_property(_eld_driver_tg GLOBAL PROPERTY ELD_DRIVER_TABLEGEN_TARGETS)
+set(LLVM_COMMON_DEPENDS ${LLVM_COMMON_DEPENDS} ${_eld_driver_tg})
+
+add_subdirectory(lib)
+add_subdirectory(tools)
+add_subdirectory(docs)
+add_subdirectory(etc)
+
+
+option(ELD_ENABLE_RUN_TESTS
+       "Enable build and run tests" OFF)
+
+# Only include tests if enabled (requires LLVM source tree)
+if(ELD_INCLUDE_TESTS)
+  add_subdirectory(test)
+else()
+  message(
+    STATUS
+      "Tests disabled (set ELD_INCLUDE_TESTS=ON to enable, requires LLVM source tree)"
+  )
+endif()
+
+add_subdirectory(Plugins)
+
+option(ELD_INSTALL_LINKER_SCRIPT_TEMPLATES
+       "Include linker script templates in the install" ON)
+option(ELD_ENABLE_PDF_DOCS
+       "Enable PDF documentation generation (requires Typst)" OFF)
+
+if(ELD_INSTALL_LINKER_SCRIPT_TEMPLATES)
+  install(
+    DIRECTORY templates/
+    DESTINATION templates
+    COMPONENT ld.eld
+    FILES_MATCHING
+    PATTERN "*.template"
+    PATTERN ".git" EXCLUDE
+    PATTERN ".svn" EXCLUDE)
+endif()
+
+set(ELD_INSTALL_YAML_MAP_PARSER
+    ON
+    CACHE BOOL "Set to OFF to skip installing YAMLMapParser.py")
+
+if(ELD_INSTALL_YAML_MAP_PARSER)
+  if("${ELD_TARGETS_TO_BUILD}" MATCHES "ARM|AArch64|RISCV")
+    set(ELD_YAML_MAP_PARSER_DEST_DIR "tools/bin")
+  else()
+    set(ELD_YAML_MAP_PARSER_DEST_DIR "bin")
+  endif()
+  install(
+    PROGRAMS utils/YAMLMapParser/YAMLMapParser.py
+    DESTINATION ${ELD_YAML_MAP_PARSER_DEST_DIR}
+    COMPONENT ld.eld)
+endif()

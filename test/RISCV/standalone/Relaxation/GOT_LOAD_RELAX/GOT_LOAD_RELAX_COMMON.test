@@ -1,0 +1,54 @@
+REQUIRES: riscv32 || riscv64
+#----------GOT_LOAD_RELAX_COMMON.test----------------- Executable------------------#
+#BEGIN_COMMENT
+# This tests checks GOT load relaxation behavior common to both relative and
+# absolute symbols around when the relaxation should not occur.
+#END_COMMENT
+#START_TEST
+
+## Check --no-relax and --no-relax-got are respected.
+RUN: %clang %clangopts -c %p/Inputs/common.s -o %t.common.o
+RUN: %link %linkopts --defsym abs_var=5 --no-relax %t.common.o -o %t.out
+RUN: %link %linkopts --defsym abs_var=5 --no-relax-got %t.common.o -o %t2.out
+RUN: %objdump --no-print-imm-hex -M no-aliases -d %t.out | %filecheck %s --check-prefix=NO-RELAX
+RUN: %objdump --no-print-imm-hex -M no-aliases -d %t2.out | %filecheck %s --check-prefix=NO-RELAX
+
+## Check non-zero addends on the got_hi are ignored, possibly allowing the
+## relaxation to proceed.
+RUN: %clang %clangopts -c %p/Inputs/addend.s -o %t.addend.o
+RUN: %link %linkopts --defsym abs_var=5 %t.addend.o -o %t.addend.out 2>&1 | %filecheck %s --check-prefix=WARN-ADDEND
+RUN: %objdump --no-print-imm-hex -M no-aliases -d %t.addend.out | %filecheck %s --check-prefix=ADDEND-RELAX
+
+## Check relaxation isn't performed if not all HI/LOs have R_RISCV_RELAX or
+## if a LO is missing.
+RUN: %clang %clangopts -c %p/Inputs/partial_relax.s -o %t.partial.o
+RUN: %link %linkopts --defsym abs_var=5 %t.partial.o -o %t.partial.out
+RUN: %objdump --no-print-imm-hex -M no-aliases -d %t.partial.out | %filecheck %s --check-prefix=PARTIAL-NO-RELAX
+
+NO-RELAX: auipc a1, 1
+NO-RELAX-NEXT: {{l[wd]}} a1, {{-?[0-9]+}}(a1)
+NO-RELAX: auipc a2, 1
+NO-RELAX-NEXT: {{l[wd]}} a2, {{-?[0-9]+}}(a2)
+
+WARN-ADDEND: ignoring addend for relocation `R_RISCV_GOT_HI20' referring symbol abs_var
+WARN-ADDEND: ignoring addend for relocation `R_RISCV_GOT_HI20' referring symbol rel_var
+
+ADDEND-RELAX: c.li a1, 5
+ADDEND-RELAX: auipc a2, 1
+ADDEND-RELAX-NEXT: addi a2, a2
+
+PARTIAL-NO-RELAX: auipc a1, 1
+PARTIAL-NO-RELAX-NEXT: {{l[wd]}} a1, {{-?[0-9]+}}(a1)
+PARTIAL-NO-RELAX: auipc a2, 1
+PARTIAL-NO-RELAX-NEXT: {{l[wd]}} a2, {{-?[0-9]+}}(a2)
+PARTIAL-NO-RELAX: auipc a1, 1
+PARTIAL-NO-RELAX-NEXT: {{l[wd]}} a1, {{-?[0-9]+}}(a1)
+PARTIAL-NO-RELAX: auipc a2, 1
+PARTIAL-NO-RELAX-NEXT: {{l[wd]}} a2, {{-?[0-9]+}}(a2)
+PARTIAL-NO-RELAX: auipc a1, 1
+PARTIAL-NO-RELAX-NEXT: {{l[wd]}} a2, {{-?[0-9]+}}(a1)
+PARTIAL-NO-RELAX-NEXT: {{l[wd]}} a3, {{-?[0-9]+}}(a1)
+PARTIAL-NO-RELAX: auipc a1, 1
+PARTIAL-NO-RELAX-NEXT: {{l[wd]}} a2, {{-?[0-9]+}}(a1)
+PARTIAL-NO-RELAX-NEXT: {{l[wd]}} a3, {{-?[0-9]+}}(a1)
+PARTIAL-NO-RELAX: auipc a1, 1

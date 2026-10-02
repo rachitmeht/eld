@@ -1,0 +1,106 @@
+//===- ExecELFReader.cpp---------------------------------------------------===//
+// Part of the eld Project, under the BSD License
+// See https://github.com/qualcomm/eld/LICENSE.txt for license information.
+// SPDX-License-Identifier: BSD-3-Clause
+//===----------------------------------------------------------------------===//
+
+#include "eld/Readers/ExecELFReader.h"
+#include "DiagnosticEntry.h"
+#include "eld/Core/Module.h"
+#include "eld/Input/ELFObjectFile.h"
+#include "eld/PluginAPI/Expected.h"
+
+using namespace eld;
+
+template <class ELFT>
+eld::Expected<bool> ExecELFReader<ELFT>::readSectionHeaders() {
+  ASSERT(this->m_LLVMELFFile, "m_LLVMELFFile must be initialized!");
+  if (!this->m_RawSectHdrs)
+    LLVMEXP_EXTRACT_AND_CHECK(this->m_RawSectHdrs,
+                              this->m_LLVMELFFile->sections());
+  ASSERT(this->m_RawSectHdrs, "m_RawSectHdrs must be initialized!");
+
+  if (this->m_RawSectHdrs->empty())
+    return true;
+
+  /// Create all sections, including the first null section.
+  for (const typename ELFReader<ELFT>::Elf_Shdr &rawSectHdr :
+       this->m_RawSectHdrs.value()) {
+    eld::Expected<ELFSection *> expSection = this->createSection(rawSectHdr);
+    ELDEXP_RETURN_DIAGENTRY_IF_ERROR(expSection);
+    ELFSection *S = expSection.value();
+    this->setSectionInInputFile(S, rawSectHdr);
+    this->setSectionAttributes(S, rawSectHdr);
+  }
+
+  this->setLinkInfoAttributes();
+
+  auto &PM = this->m_Module.getPluginManager();
+  if (!PM.callVisitSectionsHook(this->m_InputFile))
+    return false;
+
+  return true;
+}
+
+template <class ELFT>
+eld::Expected<ELFSection *> ExecELFReader<ELFT>::createSection(
+    typename ELFReader<ELFT>::Elf_Shdr rawSectHdr) {
+  Module &module = this->m_Module;
+  eld::Expected<std::string> expSectName = this->getSectionName(rawSectHdr);
+  ELDEXP_RETURN_DIAGENTRY_IF_ERROR(expSectName);
+  std::string sectName = expSectName.value();
+
+  // Setup all section properties.
+  // FIXME: sectName can be extracted from rawSectHdr.
+  LinkerSectionKind kind = this->classifySectionKind(rawSectHdr, sectName);
+
+  // FIXME: Emit some diagnostic here.
+  if (kind == LinkerSectionKind::Error)
+    return static_cast<ELFSection *>(nullptr);
+
+  bool SectionIsIgnore = false;
+  // Embedded bitcode sections must be not regarded in linking. However they
+  // must be added to context since the sh_info field of relocation sections
+  // that follow these sections will need to have proper index in section
+  // header table. We thus read them and then set to ignore to have no effect
+  // on linking.
+  if (ELFSection::isEmbeddedBitcodeSection(sectName) ||
+      ELFSection::isEmbeddedBitcodeMetadataSection(sectName))
+    SectionIsIgnore = true;
+
+  if (kind == LinkerSectionKind::EhFrame)
+    return module.getScript().sectionMap().createEhFrameSection(
+        sectName, rawSectHdr.sh_type, rawSectHdr.sh_flags,
+        rawSectHdr.sh_entsize);
+  if (kind == LinkerSectionKind::SFrame)
+    return module.getScript().sectionMap().createSFrameSection(
+        sectName, rawSectHdr.sh_type, rawSectHdr.sh_flags,
+        rawSectHdr.sh_entsize);
+
+  return module.getScript().sectionMap().createELFSection(
+      sectName, (SectionIsIgnore ? LinkerSectionKind::Discard : kind),
+      rawSectHdr.sh_type, rawSectHdr.sh_flags, rawSectHdr.sh_entsize);
+}
+
+template <class ELFT>
+eld::Expected<std::unique_ptr<ExecELFReader<ELFT>>>
+ExecELFReader<ELFT>::Create(Module &module, InputFile &inputFile) {
+  ASSERT(inputFile.isExecutableELFFile(),
+         "ExecELFReader must only be used for executable object files.");
+  plugin::DiagnosticEntry diagEntry;
+  ExecELFReader<ELFT> reader =
+      ExecELFReader<ELFT>(module, inputFile, diagEntry);
+  if (diagEntry)
+    return std::make_unique<plugin::DiagnosticEntry>(diagEntry);
+  return std::make_unique<ExecELFReader<ELFT>>(reader);
+}
+
+template <class ELFT>
+ExecELFReader<ELFT>::ExecELFReader(Module &module, InputFile &inputFile,
+                                   plugin::DiagnosticEntry &diagEntry)
+    : ELFReader<ELFT>(module, inputFile, diagEntry) {}
+
+namespace eld {
+template class ExecELFReader<llvm::object::ELF32LE>;
+template class ExecELFReader<llvm::object::ELF64LE>;
+} // namespace eld

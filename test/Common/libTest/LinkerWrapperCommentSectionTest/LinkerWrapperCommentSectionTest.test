@@ -1,0 +1,11 @@
+#UNSUPPORTED: windows, darwin
+# Mach-O libLW has no ELF .comment section.
+#---LinkerWrapperCommentSectionTest.test--------------------------- Executable -----------------#
+
+#BEGIN_COMMENT
+# This checks if the libLW.so built has only one occurence of plugin information string in it.
+#END_COMMENT
+#START_TEST
+RUN: %readelf -p .comment %llvmobjroot/lib/libLW.so 2>&1 | %filecheck %s
+#CHECK-COUNT-1: Plugin built with tools
+#END_TEST

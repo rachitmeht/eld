@@ -1,0 +1,25 @@
+UNSUPPORTED: x86
+#---SectionWithZeroSizedSymbolWithFatalWarning.test--------------------------- Executable --------------------#
+#BEGIN_COMMENT
+# This checks that when a zero sized symbol in a zero sized fragment makes the link
+# fatal (-Wall/-Wzero-sized-sections with --fatal-warnings), the fatal diagnostic is
+# emitted and a map file is still produced. Because -T linker scripts are activated in
+# command-line order, a link aborted while reading an input positioned before the -T
+# script produces a map without that script's output-section layout.
+#END_COMMENT
+#START_TEST
+RUN: %clang %clangopts -c %p/Inputs/x.s -o %t.x.o
+RUN: %clang %clangopts -c %p/Inputs/main.c -o %t.main.o
+RUN: %link -MapStyle txt %linkopts %t.x.o %t.main.o -o %t.main.out0 -T %p/Inputs/script.t -Map %t.main.map0 --trace=section=.text.baz --fatal-warnings 2>&1 | %filecheck %s --check-prefix=NOWARN
+RUN: %not %link -MapStyle txt %linkopts %t.x.o %t.main.o -o %t.main.out1 -T %p/Inputs/script.t -Map %t.main.map1 --trace=section=.text.baz -Wall --fatal-warnings 2>&1 | %filecheck %s
+RUN: %not %link -MapStyle txt %linkopts %t.x.o %t.main.o -o %t.main.out2 -T %p/Inputs/script.t -Map %t.main.map2 --trace=section=.text.baz -Wzero-sized-sections --fatal-warnings 2>&1 | %filecheck %s
+RUN: %filecheck %s < %t.main.map0 --check-prefix=NOWARNMAPCHECK
+RUN: %filecheck %s < %t.main.map1 --check-prefix=MAPCHECK
+RUN: %filecheck %s < %t.main.map2 --check-prefix=MAPCHECK
+#NOWARN-NOT: Warning: Zero sized fragment .foo for non zero sized symbol sym from input file {{.*}}x.o
+#NOWARNMAPCHECK: .text.bar
+#NOWARNMAPCHECK: {{^.text.baz}}
+#CHECK: Fatal: Zero sized fragment .foo for non zero sized symbol sym from input file {{.*}}x.o
+#MAPCHECK: # Output Section and Layout
+#MAPCHECK-NOT: *(.text.bar)
+#END_TEST

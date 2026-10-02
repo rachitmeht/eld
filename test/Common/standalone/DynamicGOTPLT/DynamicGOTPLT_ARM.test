@@ -1,0 +1,37 @@
+REQUIRES: arm
+#----------DynamicGOTPLT.test--------------------- Executable------------------#
+
+
+#BEGIN_COMMENT
+# Check the content of the GOTPLT entries and its pointer in DT_PLTGOT.
+#--------------------------------------------------------------------
+#END_COMMENT
+#
+RUN: %clang %clangopts -c %p/Inputs/1.c -fPIC -o %t.1.o
+RUN: %link %linkopts -shared %t.1.o -o %t.so
+RUN: %clang %clangopts -c %p/Inputs/2.c -fPIC -o %t.2.o
+
+## Case 1: GOTPLT is in the beginning of the .got.plt section
+RUN: %link %linkopts %t.2.o %t.so -o %t.out -T %p/Inputs/script.t
+RUN: %readelf -S --dynamic -x .got.plt %t.out | %filecheck %s
+
+CHECK: Section Headers:
+CHECK-DAG: [{{[ 0-9]+}}] .plt PROGBITS {{[[:xdigit:]]+}} {{[[:xdigit:]]+}}
+CHECK-DAG: [{{[ 0-9]+}}] .got.plt PROGBITS {{0*}}70000 {{[[:xdigit:]]+}}
+CHECK: Dynamic section at
+CHECK: 0x{{[[:xdigit:]]+}} (PLTGOT) 0x70000
+CHECK: Hex dump of section '.got.plt':
+CHECK-NEXT: 0x{{0*}}70000 00000000 00000000 00000000 {{[[:xdigit:]]+}}
+
+## Case 2: GOTPLT is not in the beginning of the .got.plt section
+RUN: %link %linkopts %t.2.o %t.so -o %t-got.out -T %p/Inputs/script-gap.t
+RUN: %readelf -S --dynamic -x .got %t-got.out | %filecheck %s --check-prefix=GAP
+
+GAP: Section Headers:
+GAP-DAG: [{{[ 0-9]+}}] .plt PROGBITS {{[[:xdigit:]]+}} {{[[:xdigit:]]+}}
+GAP-DAG: [{{[ 0-9]+}}] .got PROGBITS {{0*}}90000 {{[[:xdigit:]]+}}
+GAP: Dynamic section at
+GAP: 0x{{[[:xdigit:]]+}} (PLTGOT) 0x90008
+GAP: Hex dump of section '.got':
+GAP-NEXT: 0x{{0*}}90000 0cc0adde 00000000 00000000 00000000
+GAP-NEXT: 0x{{0*}}90010 00000000 {{[[:xdigit:]]+}}

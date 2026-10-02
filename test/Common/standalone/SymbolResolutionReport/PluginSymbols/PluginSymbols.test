@@ -1,0 +1,14 @@
+#---PluginSymbols.test--------------------- Executable, LS------------------#
+#BEGIN_COMMENT
+# This test checks the symbol resolution report when there are
+# plugin-inserted symbols.
+RUN: %clang %clangopts -o %t1.1.o %p/Inputs/1.c -c -ffunction-sections
+RUN: %link %linkopts -o %t1.1.out %t1.1.o -L%libsdir/test -T %p/Inputs/script.t --emit-symbol-resolution-report %t1.1.json
+RUN: %python %eld_src_utils_root/SymbolResolutionInspector/SymbolResolutionInspector.py %t1.1.json | %filecheck %s
+
+CHECK-DAG: start_of_foo
+CHECK-DAG: start_of_foo({{.*}}[PluginSymbols]:.text.foo) [Size=0, Def, Local, NoType, Default] [Selected]
+CHECK-DAG: end_of_foo
+CHECK-DAG: end_of_foo({{.*}}[PluginSymbols]:.text.foo) [Size=0, Def, Local, NoType, Default] [Selected]
+CHECK-DAG: foo
+CHECK-DAG: foo({{.*}}1.o:.text.foo) [Size={{.*}}, Def, Global, Function, Default] [Selected]
